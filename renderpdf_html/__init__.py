@@ -5,9 +5,9 @@ from datetime import datetime
 from typing import Tuple, Optional, List
 
 import azure.functions as func
-from jinja2 import Environment, FileSystemLoader, select_autoescape, TemplateError
+from jinja2 import Environment, select_autoescape, TemplateError
 
-# Optional: upload to blob (only if lib + connection are available)
+# Optional blob upload
 try:
     from azure.storage.blob import BlobServiceClient
 except Exception:  # pragma: no cover
@@ -15,20 +15,15 @@ except Exception:  # pragma: no cover
 
 
 # =============================================================================
-# Helpers
+# Utilities
 # =============================================================================
 
 def _parse_primary_color() -> Tuple[str, Tuple[int, int, int]]:
-    """
-    Read PDF_PRIMARY_RGB env var as 'r,g,b' and return ('#RRGGBB', (r,g,b)).
-    Default color = 15,98,254 (#0F62FE) if unset/invalid.
-    """
+    """Read PDF_PRIMARY_RGB 'r,g,b' -> ('#RRGGBB',(r,g,b)); default 15,98,254."""
     raw = os.getenv("PDF_PRIMARY_RGB", "15,98,254")
     try:
         r, g, b = [int(x.strip()) for x in raw.split(",")]
-        r = max(0, min(255, r))
-        g = max(0, min(255, g))
-        b = max(0, min(255, b))
+        r = max(0, min(255, r)); g = max(0, min(255, g)); b = max(0, min(255, b))
     except Exception:
         r, g, b = (15, 98, 254)
     return f"#{r:02X}{g:02X}{b:02X}", (r, g, b)
@@ -39,20 +34,14 @@ def _normalize_list(val):
 
 
 def _normalize_cv(cv: dict) -> dict:
-    """
-    Normalize incoming CV JSON so the template always gets predictable shapes.
-    - work_experience, education: lists
-    - skills_groups: list of {group, items[]}, supports dict {"Tech":[...]} or list-of-dicts
-    - languages: list of {name, level?/reading/writing/speaking}
-    - personal_info defaults present (avoid KeyErrors)
-    """
+    """Give the template predictable shapes (lists, list-of-dicts, defaults)."""
     cv = cv or {}
 
     # Lists
     for k in ("work_experience", "education"):
         cv[k] = _normalize_list(cv.get(k))
 
-    # Skills groups
+    # Skills groups: dict -> list-of-dicts; list -> cleaned list
     sg = cv.get("skills_groups")
     if isinstance(sg, dict):
         cv["skills_groups"] = [{"group": k, "items": (v or [])} for k, v in sg.items()]
@@ -65,7 +54,7 @@ def _normalize_cv(cv: dict) -> dict:
     else:
         cv["skills_groups"] = []
 
-    # Languages (optional keys compatible with CEFR style)
+    # Languages (accept dict or list)
     langs = cv.get("languages") or cv.get("language_skills")
     if isinstance(langs, list):
         cv["languages"] = langs
@@ -73,16 +62,14 @@ def _normalize_cv(cv: dict) -> dict:
         norm = []
         for name, levels in langs.items():
             if isinstance(levels, dict):
-                entry = {"name": name}
-                entry.update(levels)
-                norm.append(entry)
+                entry = {"name": name}; entry.update(levels); norm.append(entry)
             else:
                 norm.append({"name": name, "level": str(levels)})
         cv["languages"] = norm
     else:
         cv["languages"] = []
 
-    # Personal info scaffold
+    # Personal info defaults
     pi = cv.setdefault("personal_info", {})
     for key in (
         "full_name", "headline", "address", "city", "country",
@@ -96,14 +83,13 @@ def _normalize_cv(cv: dict) -> dict:
 
 def _template_search_dirs() -> List[str]:
     """
-    Build an ordered list of directories to search for templates.
-    Order:
-      1) CV_TEMPLATE_DIR (absolute or relative to app root)
-      2) renderpdf_html/templates
+    Directory order:
+      1) CV_TEMPLATE_DIR (abs or relative to /site/wwwroot)
+      2) /site/wwwroot/renderpdf_html/templates
       3) /site/wwwroot/templates
-      4) renderpdf_html
+      4) /site/wwwroot/renderpdf_html
       5) /site/wwwroot
-    Duplicates removed; only existing dirs kept.
+    Only existing dirs are kept, duplicates removed.
     """
     here = os.path.dirname(__file__)                      # /site/wwwroot/renderpdf_html
     app_root = os.path.abspath(os.path.join(here, ".."))  # /site/wwwroot
@@ -111,10 +97,7 @@ def _template_search_dirs() -> List[str]:
     dirs: List[str] = []
     override = os.getenv("CV_TEMPLATE_DIR")
     if override:
-        if os.path.isabs(override):
-            dirs.append(override)
-        else:
-            dirs.append(os.path.join(app_root, override))
+        dirs.append(override if os.path.isabs(override) else os.path.join(app_root, override))
 
     dirs += [
         os.path.join(here, "templates"),
@@ -127,96 +110,73 @@ def _template_search_dirs() -> List[str]:
     for d in dirs:
         d = os.path.normpath(d)
         if d not in seen and os.path.isdir(d):
-            seen.add(d)
-            ordered.append(d)
+            seen.add(d); ordered.append(d)
     return ordered
 
 
-def _render_html_flexible(cv: dict) -> str:
+def _find_template_file(wanted: str) -> Optional[str]:
     """
-    Render HTML using Jinja2 with flexible template lookup.
-    Honours:
-      - CV_TEMPLATE_NAME (default: 'cv_europass.html')
-      - CV_TEMPLATE_DIR  (optional; see _template_search_dirs())
-    Tries exact name first; if not found, attempts case-insensitive match in each dir.
-    Raises TemplateError with a helpful directory listing if not found.
+    Return absolute path to the template if found (exact or case-insensitive),
+    else None.
     """
-    wanted = os.getenv("CV_TEMPLATE_NAME", "cv_europass.html")
     search_dirs = _template_search_dirs()
-    primary_hex, primary_rgb = _parse_primary_color()
-
-    env = Environment(
-        loader=FileSystemLoader(search_dirs),
-        autoescape=select_autoescape(["html", "xml"]),
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
-
-    # 1) Try exact filename
-    try:
-        tpl = env.get_template(wanted)
-        return tpl.render(cv=cv, theme={"primary_hex": primary_hex, "primary_rgb": primary_rgb}, now=datetime.utcnow())
-    except Exception:
-        pass
-
-    # 2) Try case-insensitive fallback in each search dir
+    # exact first
+    for d in search_dirs:
+        p = os.path.join(d, wanted)
+        if os.path.isfile(p):
+            return p
+    # case-insensitive fallback
     lower = wanted.lower()
     for d in search_dirs:
         try:
             for fname in os.listdir(d):
-                if fname.lower() == lower:
-                    tpl = env.get_template(fname)
-                    return tpl.render(cv=cv, theme={"primary_hex": primary_hex, "primary_rgb": primary_rgb}, now=datetime.utcnow())
+                if fname.lower() == lower and os.path.isfile(os.path.join(d, fname)):
+                    return os.path.join(d, fname)
         except Exception:
             continue
+    return None
 
-    # 3) Helpful error with directory listings
-    listings = []
-    for d in search_dirs:
-        try:
-            entries = ", ".join(sorted(os.listdir(d)))
-        except Exception as e:
-            entries = f"(unreadable: {e})"
-        listings.append(f"{d}: {entries}")
-    raise TemplateError(
-        "Template not found. "
-        f"Tried '{wanted}' (case-insensitive) in:\n" + "\n".join(listings)
+
+def _render_html_from_file(cv: dict, filepath: str) -> str:
+    """Read a template file and render it using env.from_string()."""
+    primary_hex, primary_rgb = _parse_primary_color()
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    env = Environment(
+        autoescape=select_autoescape(["html", "xml"]),
+        trim_blocks=True, lstrip_blocks=True,
     )
+    tpl = env.from_string(content)
+    return tpl.render(cv=cv, theme={"primary_hex": primary_hex, "primary_rgb": primary_rgb}, now=datetime.utcnow())
 
 
 def _html_to_pdf_bytes(html: str) -> bytes:
-    """
-    Convert HTML → PDF using Playwright Chromium.
-    First cold run on Consumption may download Chromium; the function can be retried if needed.
-    """
+    """HTML → PDF via Playwright Chromium."""
     from playwright.sync_api import sync_playwright
-
     args = ["--no-sandbox", "--disable-setuid-sandbox"]
     with sync_playwright() as p:
         browser = p.chromium.launch(args=args)
         context = browser.new_context()
         page = context.new_page()
         page.set_content(html, wait_until="load")
-        pdf_bytes = page.pdf(
+        pdf = page.pdf(
             format="A4",
             print_background=True,
             margin={"top": "14mm", "right": "14mm", "bottom": "14mm", "left": "14mm"},
         )
         browser.close()
-    return pdf_bytes
+    return pdf
 
 
 def _upload_pdf(file_name: str, data: bytes) -> Tuple[Optional[str], Optional[str]]:
     """
-    Upload to blob if AzureWebJobsStorage + azure-storage-blob available.
-    Uses:
-      - PDF_OUT_CONTAINER (default 'pdf-out')
-      - PDF_OUT_BASE (optional SAS container URL like 'https://acct.blob.core.windows.net/pdf-out?sv=...')
-    Returns (blob_name, url_or_None).
+    Uploads to blob if AzureWebJobsStorage is set and azure-storage-blob is available.
+    PDF_OUT_CONTAINER (default 'pdf-out')
+    PDF_OUT_BASE (SAS container URL) → returns a direct URL if provided.
     """
     conn_str = os.getenv("AzureWebJobsStorage")
     container = os.getenv("PDF_OUT_CONTAINER", "pdf-out")
-    base = os.getenv("PDF_OUT_BASE")  # SAS container URL (optional)
+    base = os.getenv("PDF_OUT_BASE")
 
     if not (conn_str and BlobServiceClient):
         return None, None
@@ -224,10 +184,9 @@ def _upload_pdf(file_name: str, data: bytes) -> Tuple[Optional[str], Optional[st
     bsc = BlobServiceClient.from_connection_string(conn_str)
     cc = bsc.get_container_client(container)
     try:
-        cc.create_container()  # idempotent
+        cc.create_container()
     except Exception:
         pass
-
     cc.upload_blob(name=file_name, data=data, overwrite=True, content_type="application/pdf")
 
     url = None
@@ -238,7 +197,7 @@ def _upload_pdf(file_name: str, data: bytes) -> Tuple[Optional[str], Optional[st
 
 
 # =============================================================================
-# Azure Function entry point
+# Azure Function
 # =============================================================================
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
@@ -246,21 +205,19 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     POST body:
     {
       "file_name": "mycv.pdf",
-      "cv": { ... data ... }
+      "cv": { ... }
     }
 
-    Env (optional):
-      CV_TEMPLATE_NAME  (default: cv_europass.html)
-      CV_TEMPLATE_DIR   (extra search folder; abs or relative to /site/wwwroot)
-      PDF_PRIMARY_RGB   (e.g. "15,98,254")
-      PDF_OUT_CONTAINER (default: pdf-out)
-      PDF_OUT_BASE      (SAS container URL, returns URL if set)
-      AzureWebJobsStorage (to upload to blob)
+    Env:
+      CV_TEMPLATE_NAME (default: cv_europass.html)
+      CV_TEMPLATE_DIR  (optional search dir; abs or relative to /site/wwwroot)
+      PDF_PRIMARY_RGB  (e.g., "15,98,254")
+      AzureWebJobsStorage, PDF_OUT_CONTAINER, PDF_OUT_BASE (for blob upload)
     """
     if req.method != "POST":
         return func.HttpResponse("POST only", status_code=405)
 
-    # Parse JSON
+    # Parse body
     try:
         payload = req.get_json()
     except ValueError:
@@ -272,23 +229,39 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     cv = _normalize_cv(payload.get("cv") or {})
 
-    # Render HTML with flexible template discovery
-    try:
-        html = _render_html_flexible(cv)
-    except TemplateError as e:
-        # Return the listings so you can see exactly where the template was sought
-        return func.HttpResponse(f"TemplateError: {e}", status_code=500)
+    # Find template file (robust, multi-dir)
+    wanted = os.getenv("CV_TEMPLATE_NAME", "cv_europass.html")
+    path = _find_template_file(wanted)
+    if not path:
+        # Helpful listing
+        listings = []
+        for d in _template_search_dirs():
+            try:
+                entries = ", ".join(sorted(os.listdir(d)))
+            except Exception as e:
+                entries = f"(unreadable: {e})"
+            listings.append(f"{d}: {entries}")
+        return func.HttpResponse(
+            "Template not found. "
+            f"Tried '{wanted}' (case-insensitive) in:\n" + "\n".join(listings),
+            status_code=500,
+        )
 
-    # Convert to PDF
+    # Render HTML
+    try:
+        html = _render_html_from_file(cv, path)
+    except TemplateError as e:
+        ln = getattr(e, "lineno", "?")
+        return func.HttpResponse(f"TemplateError (line {ln}): {e}", status_code=500)
+
+    # HTML → PDF
     try:
         pdf_bytes = _html_to_pdf_bytes(html)
     except Exception as e:
-        # First run may need a retry if Chromium is being downloaded
         return func.HttpResponse(f"PDF render error: {e}", status_code=500)
 
-    # Upload if possible; otherwise return base64
+    # Upload if configured; else return base64
     blob_name, url = _upload_pdf(file_name, pdf_bytes)
-
     resp = {"ok": True, "pdf_blob": blob_name or file_name}
     if url:
         resp["url"] = url

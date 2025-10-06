@@ -12,7 +12,6 @@
     --line: #e6e8eb;
     --bg: #ffffff;
   }
-  /* Reset/typography */
   *{ box-sizing:border-box; }
   html,body{ margin:0; padding:0; background:var(--bg); color:var(--ink); font: 12px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Noto Sans", "Liberation Sans", "Segoe UI Emoji"; }
   h1,h2,h3{ margin:0 0 .35rem; line-height:1.2; font-weight:700; }
@@ -24,23 +23,15 @@
   li{ margin: .15rem 0; }
   small, .muted{ color:var(--muted); }
 
-  /* Page layout (A4 friendly) */
-  .page{
-    display:grid;
-    grid-template-columns: 32% 1fr;
-    gap:18px;
-    padding:18px;
-  }
-  .left{
-    border-right: 2px solid var(--line);
-    padding-right: 14px;
-  }
-  .right{
-    padding-left: 4px;
-  }
+  .page{ display:grid; grid-template-columns: 32% 1fr; gap:18px; padding:18px; }
+  .left{ border-right: 2px solid var(--line); padding-right: 14px; }
+  .right{ padding-left: 4px; }
 
   .chip{
-    display:inline-block; padding:.18rem .5rem; border-radius:999px; background: color-mix(in srgb, var(--primary) 12%, white); color: var(--ink); border:1px solid color-mix(in srgb, var(--primary) 30%, white);
+    display:inline-block; padding:.18rem .5rem; border-radius:999px;
+    background: color-mix(in srgb, var(--primary) 12%, white);
+    color: var(--ink);
+    border:1px solid color-mix(in srgb, var(--primary) 30%, white);
     margin: 0 .35rem .35rem 0; font-size:11px;
   }
 
@@ -52,83 +43,48 @@
   }
   .label{ font-size:11px; color:var(--muted); }
 
-  .job{
-    margin: 10px 0 12px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--line);
-  }
+  .job{ margin: 10px 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
   .job:last-child{ border-bottom:0; }
-
-  .job-head{
-    display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
-  }
+  .job-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; }
   .job-title{ font-weight:700; }
   .job-meta{ color:var(--muted); font-size:11px; }
 
   .edu{ margin: 8px 0 10px; }
-  .badge{
-    display:inline-block; padding:.12rem .4rem; border-radius:4px; background: color-mix(in srgb, var(--primary) 10%, white); border:1px solid color-mix(in srgb, var(--primary) 30%, white);
-    font-size:10px; color:var(--ink);
-  }
+  .badge{ display:inline-block; padding:.12rem .4rem; border-radius:4px; background: color-mix(in srgb, var(--primary) 10%, white); border:1px solid color-mix(in srgb, var(--primary) 30%, white); font-size:10px; color:var(--ink); }
 
-  /* Print tweaks */
   @page { size: A4; margin: 14mm; }
-  @media print{
-    .page{ gap:14px; }
-    a{ color:inherit; text-decoration:none; }
-  }
+  @media print{ .page{ gap:14px; } a{ color:inherit; text-decoration:none; } }
 </style>
 </head>
 <body>
   <div class="page">
-    <!-- LEFT COLUMN -->
     <aside class="left">
       <h1>{{ cv.personal_info.full_name }}</h1>
       {% if cv.personal_info.headline %}<div class="label">{{ cv.personal_info.headline }}</div>{% endif %}
       <div class="rule"></div>
 
-      <!-- Contact -->
       <section class="section">
         <h2>Contact</h2>
         <div class="contact-grid">
-          {% if cv.personal_info.address %}
-            <div>📍</div><div>{{ cv.personal_info.address }}</div>
-          {% endif %}
-          {% if cv.personal_info.city or cv.personal_info.country %}
-            <div>🌐</div><div>{{ cv.personal_info.city }}{{ ", " if cv.personal_info.city and cv.personal_info.country }}{{ cv.personal_info.country }}</div>
-          {% endif %}
-          {% if cv.personal_info.email %}
-            <div>✉️</div><div>{{ cv.personal_info.email }}</div>
-          {% endif %}
-          {% if cv.personal_info.phone %}
-            <div>☎️</div><div>{{ cv.personal_info.phone }}</div>
-          {% endif %}
-          {% if cv.personal_info.website %}
-            <div>🔗</div><div>{{ cv.personal_info.website }}</div>
-          {% endif %}
-          {% if cv.personal_info.linkedin %}
-            <div>💼</div><div>{{ cv.personal_info.linkedin }}</div>
-          {% endif %}
-          {% if cv.personal_info.nationality %}
-            <div>🪪</div><div>{{ cv.personal_info.nationality }}</div>
-          {% endif %}
-          {% if cv.personal_info.date_of_birth %}
-            <div>🎂</div><div>{{ cv.personal_info.date_of_birth }}</div>
-          {% endif %}
-          {% if cv.personal_info.gender %}
-            <div>⚧️</div><div>{{ cv.personal_info.gender }}</div>
-          {% endif %}
+          {% if cv.personal_info.address %}<div>📍</div><div>{{ cv.personal_info.address }}</div>{% endif %}
+          {% if cv.personal_info.city or cv.personal_info.country %}<div>🌐</div><div>{{ cv.personal_info.city }}{{ ", " if cv.personal_info.city and cv.personal_info.country }}{{ cv.personal_info.country }}</div>{% endif %}
+          {% if cv.personal_info.email %}<div>✉️</div><div>{{ cv.personal_info.email }}</div>{% endif %}
+          {% if cv.personal_info.phone %}<div>☎️</div><div>{{ cv.personal_info.phone }}</div>{% endif %}
+          {% if cv.personal_info.website %}<div>🔗</div><div>{{ cv.personal_info.website }}</div>{% endif %}
+          {% if cv.personal_info.linkedin %}<div>💼</div><div>{{ cv.personal_info.linkedin }}</div>{% endif %}
+          {% if cv.personal_info.nationality %}<div>🪪</div><div>{{ cv.personal_info.nationality }}</div>{% endif %}
+          {% if cv.personal_info.date_of_birth %}<div>🎂</div><div>{{ cv.personal_info.date_of_birth }}</div>{% endif %}
+          {% if cv.personal_info.gender %}<div>⚧️</div><div>{{ cv.personal_info.gender }}</div>{% endif %}
         </div>
       </section>
 
-      <!-- Skills -->
       {% if cv.skills_groups %}
       <section class="section">
         <h2>Skills</h2>
         {% for sg in cv.skills_groups or [] %}
           {% if sg.group %}<div class="label" style="margin-top:.25rem;">{{ sg.group }}</div>{% endif %}
           <div style="margin:.25rem 0 .5rem;">
-            {% for s in sg.items or [] %}
+            {% for s in sg["items"] or [] %}
               <span class="chip">{{ s }}</span>
             {% endfor %}
           </div>
@@ -136,7 +92,6 @@
       </section>
       {% endif %}
 
-      <!-- Languages -->
       {% if cv.languages %}
       <section class="section">
         <h2>Languages</h2>
@@ -157,7 +112,6 @@
       {% endif %}
     </aside>
 
-    <!-- RIGHT COLUMN -->
     <main class="right">
 
       {% if cv.summary or cv.about or cv.personal_info.summary %}
@@ -173,22 +127,17 @@
         {% for job in cv.work_experience or [] %}
           <div class="job">
             <div class="job-head">
-              <div class="job-title">
-                {{ job.title }}{% if job.company %} — {{ job.company }}{% endif %}
-              </div>
+              <div class="job-title">{{ job.title }}{% if job.company %} — {{ job.company }}{% endif %}</div>
               <div class="job-meta">
                 {% set sd = job.start_date or "" %}
                 {% set ed = job.end_date or ("Present" if job.get("current") else "") %}
-                {{ sd }}{% if sd or ed %} – {% endif %}{{ ed }}
-                {% if job.location %} · {{ job.location }}{% endif %}
+                {{ sd }}{% if sd or ed %} – {% endif %}{{ ed }}{% if job.location %} · {{ job.location }}{% endif %}
               </div>
             </div>
             {% if job.description %}<p class="muted" style="margin-top:.2rem;">{{ job.description }}</p>{% endif %}
             {% if job.bullets %}
               <ul>
-                {% for b in job.bullets or [] %}
-                  <li>{{ b }}</li>
-                {% endfor %}
+                {% for b in job.bullets or [] %}<li>{{ b }}</li>{% endfor %}
               </ul>
             {% endif %}
           </div>
@@ -202,15 +151,10 @@
         {% for e in cv.education or [] %}
           <div class="edu">
             <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-              <div>
-                <strong>{{ e.degree or e.title }}</strong>
-                {% if e.institution %} — {{ e.institution }}{% endif %}
-              </div>
+              <div><strong>{{ e.degree or e.title }}</strong>{% if e.institution %} — {{ e.institution }}{% endif %}</div>
               <div class="label">
-                {% set sd = e.start_date or "" %}
-                {% set ed = e.end_date or "" %}
-                {{ sd }}{% if sd or ed %} – {% endif %}{{ ed }}
-                {% if e.location %} · {{ e.location }}{% endif %}
+                {% set sd = e.start_date or "" %}{% set ed = e.end_date or "" %}
+                {{ sd }}{% if sd or ed %} – {% endif %}{{ ed }}{% if e.location %} · {{ e.location }}{% endif %}
               </div>
             </div>
             {% if e.details %}<p class="muted">{{ e.details }}</p>{% endif %}
@@ -225,8 +169,7 @@
         <ul>
           {% for p in cv.publications or [] %}
             <li>
-              <strong>{{ p.title }}</strong>
-              {% if p.year %}<span class="label"> — {{ p.year }}</span>{% endif %}
+              <strong>{{ p.title }}</strong>{% if p.year %}<span class="label"> — {{ p.year }}</span>{% endif %}
               {% if p.url %} · <a href="{{ p.url }}">{{ p.url }}</a>{% endif %}
               {% if p.summary %}<div class="muted">{{ p.summary }}</div>{% endif %}
             </li>

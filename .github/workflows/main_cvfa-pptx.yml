@@ -1,4 +1,4 @@
-name: Deploy Azure Functions (Python)
+name: Build in Azure Functions image & Deploy
 
 on:
   push:
@@ -6,32 +6,54 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build:
+    # Build inside the SAME image Azure Functions uses → compatible wheels
     runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/azure-functions/python:4-python3.10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Preflight: prove host.json + requirements.txt are at repo root ---
-      - name: Preflight checks
-        shell: bash
+      - name: Verify repo root (host.json + requirements.txt)
         run: |
-          echo "Listing repo root:"
           ls -la
-          echo "----"
-          test -f host.json || (echo "host.json NOT found at repo root" && exit 1)
-          test -f requirements.txt || (echo "requirements.txt NOT found at repo root" && exit 1)
-          echo "First few lines of requirements.txt:"
-          head -n 50 requirements.txt || true
+          test -f host.json
+          test -f requirements.txt
 
-      # --- Deploy and force server-side Oryx build on Kudu ---
-      - name: Deploy to Azure Functions (Oryx remote build)
+      - name: Vendor deps into .python_packages (inside Azure Functions image)
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
+          python -c "import jinja2; print('vendored jinja2', jinja2.__version__)"
+
+      - name: Create deployment zip
+        run: |
+          zip -r release.zip . \
+            -x ".git/*" ".github/*" ".venv/*" "venv/*" "__pycache__/*" ".pytest_cache/*" "*.PublishSettings" "local.settings.json"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: function-app
+          path: release.zip
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: function-app
+
+      - name: Unzip artifact
+        run: unzip -q release.zip
+
+      - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
-          app-name: "cvfa-pptx-acgjage0g8csb2cq"   # your Function App name
-          package: "."                              # repo root contains host.json + requirements.txt
+          app-name: "cvfa-pptx-acgjage0g8csb2cq"
+          package: "."
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          remote-build: true                        # ensure build happens on Azure
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
           respect-funcignore: true

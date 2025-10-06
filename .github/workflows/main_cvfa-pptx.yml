@@ -7,7 +7,7 @@ on:
 
 env:
   PYTHON_VERSION: '3.10'
-  PACKAGE_PATH: '.'   # repo root has host.json
+  PACKAGE_PATH: '.'   # repo root contains host.json
 
 jobs:
   build:
@@ -16,31 +16,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python ${{ env.PYTHON_VERSION }}
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Show Python info
+      - name: Vendor deps into .python_packages
         run: |
-          python -V
-          pip -V
-
-      - name: Vendor deps into .python_packages (for Azure Functions runtime)
-        run: |
-          set -euxo pipefail
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
           python - <<'PY'
-import sys
-print("✅ Vendored site-packages present:", ".python_packages/lib/site-packages" in str(sys.path))
 import jinja2, azure.functions, requests
 print("✅ jinja2", jinja2.__version__)
 print("✅ azure.functions", azure.functions.__version__)
 print("✅ requests", requests.__version__)
 PY
 
-      - name: Create deployment artifact
+      - name: Create deployment zip
         run: |
           zip -r release.zip . \
             -x ".git/*" ".github/*" ".venv/*" "venv/*" "__pycache__/*" ".pytest_cache/*" "*.PublishSettings" "local.settings.json"

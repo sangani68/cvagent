@@ -8,7 +8,7 @@ import azure.functions as func
 import requests
 
 
-# --------- ENV / CONFIG ----------
+# --------- ENV / CONFIG -----------
 FUNCS_BASE_URL = os.getenv("FUNCS_BASE_URL", "").rstrip("/")
 FUNCS_KEY      = os.getenv("FUNCS_KEY", "")
 TIMEOUT_S      = int(os.getenv("CVAGENT_HTTP_TIMEOUT", "180"))

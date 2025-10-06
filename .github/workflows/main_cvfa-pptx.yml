@@ -1,8 +1,7 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-# More info on Python, GitHub Actions, and Azure Functions: https://aka.ms/python-webapps-actions
+# Builds and deploys Python Azure Functions by vendoring deps into .python_packages
+# so the app has Jinja2/Playwright/etc at runtime (no Oryx dependency).
 
-name: Build and deploy Python project to Azure Function App - cvfa-pptx
+name: Build and deploy Python project to Azure Function App - cvfa-pptx-acgjage0g8csb2cq
 
 on:
   push:
@@ -11,49 +10,47 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.10' # set this to the python version to use (supports 3.6, 3.7, 3.8)
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'    # repo root contains host.json
+  PYTHON_VERSION: '3.10'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python version
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Create and start virtual environment
+      # Vendor dependencies directly into .python_packages for Azure Functions runtime
+      - name: Vendor Python dependencies into .python_packages
         run: |
-          python -m venv venv
-          source venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
+          python -c "import jinja2, azure.functions; print('✅ vendored:', jinja2.__version__)"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # Optional: Add step to run tests here
-
+      # Create a clean deployment zip (exclude venv/.git/.github)
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: |
+          zip -r release.zip . \
+            -x "venv/*" ".venv/*" ".git/*" ".github/*" ".pytest_cache/*" "__pycache__/*" "*.PublishSettings" "local.settings.json"
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: |
-            release.zip
-            !venv/
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
-    
+
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
@@ -62,14 +59,14 @@ jobs:
 
       - name: Unzip artifact for deployment
         run: |
-          unzip release.zip
-          rm release.zip
-        
-      - name: 'Deploy to Azure Functions'
+          unzip -q release.zip
+          rm -f release.zip
+
+      - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         id: deploy-to-function
         with:
-          app-name: 'cvfa-pptx'
+          app-name: 'cvfa-pptx-acgjage0g8csb2cq'   # <-- your exact Function App name
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_09DEA36CAAE04DD4AD88C7371465B57F }}

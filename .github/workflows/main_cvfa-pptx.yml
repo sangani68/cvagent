@@ -8,19 +8,30 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # --- Preflight: prove host.json + requirements.txt are at repo root ---
+      - name: Preflight checks
+        shell: bash
+        run: |
+          echo "Listing repo root:"
+          ls -la
+          echo "----"
+          test -f host.json || (echo "host.json NOT found at repo root" && exit 1)
+          test -f requirements.txt || (echo "requirements.txt NOT found at repo root" && exit 1)
+          echo "First few lines of requirements.txt:"
+          head -n 50 requirements.txt || true
+
+      # --- Deploy and force server-side Oryx build on Kudu ---
       - name: Deploy to Azure Functions (Oryx remote build)
         uses: Azure/functions-action@v1
         with:
-          app-name: "cvfa-pptx-acgjage0g8csb2cq"              # your Function App name
-          package: "."                                         # repo root contains host.json
+          app-name: "cvfa-pptx-acgjage0g8csb2cq"   # your Function App name
+          package: "."                              # repo root contains host.json + requirements.txt
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          remote-build: true                                   # <-- ensures server-side Oryx build
+          remote-build: true                        # ensure build happens on Azure
           scm-do-build-during-deployment: true
           enable-oryx-build: true
           respect-funcignore: true

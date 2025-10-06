@@ -1,255 +1,219 @@
-# /cvagent/__init__.py
 import os
 import json
+import base64
 import logging
 from typing import Any, Dict, Optional
 
 import azure.functions as func
 import requests
 
-
-# --------- ENV / CONFIG -----------
-FUNCS_BASE_URL = os.getenv("FUNCS_BASE_URL", "").rstrip("/")
-FUNCS_KEY      = os.getenv("FUNCS_KEY", "")
-TIMEOUT_S      = int(os.getenv("CVAGENT_HTTP_TIMEOUT", "180"))
-
-INCOMING_CONTAINER        = os.getenv("COMING_CONTAINER", "incoming")
-JSON_PARSED_CONTAINER   = os.getenv("JSON_PARSED_CONTAINER", "json-parsed")
-PDF_OUT_CONTAINER       = os.getenv("PDF_OUT_CONTAINER", "pdf-out")
-
-# Optional SAS bases for composing direct download URLs
-STORAGE_JSON_BASE = os.getenv("STORAGE_JSON_BASE", "").rstrip("/")
-PDF_OUT_BASE      = os.getenv("PDF_OUT_BASE", "").rstrip("/")
+# Optional: to stage PPTX into blob when using URL/base64
+try:
+    from azure.storage.blob import BlobServiceClient
+except Exception:  # pragma: no cover
+    BlobServiceClient = None
 
 
-# --------- HELPERS ----------
-class StepError(Exception):
-    pass
+# =========================
+# Env / config
+# =========================
+
+def _get_base_url() -> str:
+    # Prefer explicit override for cross-app orchestration; else same app
+    explicit = os.getenv("DOWNSTREAM_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    host = os.getenv("WEBSITE_HOSTNAME")  # e.g. cvfa-...azurewebsites.net
+    if not host:
+        raise RuntimeError("WEBSITE_HOSTNAME not set; set DOWNSTREAM_BASE_URL env to https://<app>.azurewebsites.net")
+    return f"https://{host}"
+
+# individual paths (can be overridden)
+PPTXEXTRACT_PATH = os.getenv("PPTXEXTRACT_PATH", "/api/pptextract")
+CVNORMALIZE_PATH = os.getenv("CVNORMALIZE_PATH", "/api/cvnormalize")
+RENDER_PATH     = os.getenv("RENDER_PATH",     "/api/renderpdf_html")
+
+# keys: prefer per-function keys, else fall back to HOST_KEY (host-level)
+HOST_KEY          = os.getenv("HOST_KEY") or os.getenv("DOWNSTREAM_KEY")
+PPTXEXTRACT_KEY   = os.getenv("PPTXEXTRACT_KEY", HOST_KEY)
+CVNORMALIZE_KEY   = os.getenv("CVNORMALIZE_KEY", HOST_KEY)
+RENDER_KEY        = os.getenv("RENDER_KEY", HOST_KEY)
+
+COMING_CONTAINER  = os.getenv("COMING_CONTAINER", "incoming")  # where PPTX blob is / will be staged
+TIMEOUT_EXTRACT   = int(os.getenv("TIMEOUT_EXTRACT", "180"))
+TIMEOUT_NORMALIZE = int(os.getenv("TIMEOUT_NORMALIZE", "180"))
+TIMEOUT_RENDER    = int(os.getenv("TIMEOUT_RENDER", "300"))
 
 
-def _assert_config():
-    missing = []
-    if not FUNCS_BASE_URL: missing.append("FUNCS_BASE_URL")
-    if not FUNCS_KEY:      missing.append("FUNCS_KEY")
-    if missing:
-        raise StepError(f"Missing app settings: {', '.join(missing)}")
+# =========================
+# Utilities
+# =========================
 
-
-def _call_func(path: str, payload: Dict[str, Any], timeout: int = TIMEOUT_S) -> Dict[str, Any]:
+def _http_call(path: str, key: Optional[str], payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     """
-    POST to an internal function endpoint with the shared function key.
-    Raises StepError with a readable message on errors.
+    Calls another function in the same app (or external app) via HTTP POST.
+    Adds x-functions-key if provided. Returns JSON, raises on HTTP error.
     """
-    url = f"{FUNCS_BASE_URL}{path}"
-    try:
-        r = requests.post(
-            f"{url}?code={FUNCS_KEY}",
-            json=payload,
-            timeout=timeout,
-        )
-    except requests.RequestException as e:
-        raise StepError(f"HTTP error calling {path}: {e}")
-
+    base = _get_base_url()
+    url = f"{base}{path}"
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["x-functions-key"] = key
+    logging.info("Calling %s", url)
+    r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
     if r.status_code >= 400:
-        # Try to surface JSON error if present
-        try:
-            err = r.json()
-        except Exception:
-            err = r.text
-        raise StepError(f"{path} failed {r.status_code}: {err}")
-
+        raise RuntimeError(f"Downstream error {r.status_code} calling {path}: {r.text[:800]}")
     try:
         return r.json()
     except Exception:
-        # If child returned plain text, wrap it
-        return {"_raw_text": r.text}
+        # Some functions might return non-JSON (e.g. base64-only); wrap it
+        return {"raw": r.text}
 
 
-def _compose_blob_url(base: str, blob_name: str) -> Optional[str]:
+def _stage_blob_from_url_or_b64(pptx_url: Optional[str], pptx_b64: Optional[str], desired_name: Optional[str]) -> Optional[str]:
     """
-    If `base` is a container SAS (or public container URL), append blob.
-    Accepts:
-      - https://acct.blob.core.windows.net/container?sv=...  (container SAS)
-      - https://acct.blob.core.windows.net/container          (public)
+    If pptx_blob not provided, and we have a URL or base64, upload to COMING_CONTAINER and return the blob name.
+    Requires AzureWebJobsStorage and azure-storage-blob.
     """
-    if not base:
+    if not (pptx_url or pptx_b64):
         return None
-    if "?" in base:
-        # container SAS
-        pre, qs = base.split("?", 1)
-        return f"{pre.rstrip('/')}/{blob_name}?{qs}"
-    return f"{base.rstrip('/')}/{blob_name}"
+    if not BlobServiceClient:
+        raise RuntimeError("azure-storage-blob not available to stage PPTX. Provide 'pptx_blob' or install dependency.")
+
+    conn = os.getenv("AzureWebJobsStorage")
+    if not conn:
+        raise RuntimeError("AzureWebJobsStorage not set; cannot stage PPTX into blob.")
+
+    bsc = BlobServiceClient.from_connection_string(conn)
+    cc = bsc.get_container_client(COMING_CONTAINER)
+    try:
+        cc.create_container()
+    except Exception:
+        pass
+
+    if pptx_url:
+        resp = requests.get(pptx_url, timeout=120)
+        resp.raise_for_status()
+        content = resp.content
+        name = desired_name or os.path.basename(pptx_url.split("?")[0]) or "input.pptx"
+    else:
+        content = base64.b64decode(pptx_b64)
+        name = desired_name or "input.pptx"
+
+    cc.upload_blob(name=name, data=content, overwrite=True,
+                   content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    logging.info("Staged PPTX to container '%s' as blob '%s'", COMING_CONTAINER, name)
+    return name
 
 
-def _first_non_empty(*vals):
-    for v in vals:
-        if v not in (None, "", []):
-            return v
-    return None
+def _extract_to_cv_or_text(extract_res: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize pptextract output for cvnormalize.
+    If pptextract already returned a 'cv', pass it through.
+    Else pass text-like content (slides_text/raw/text).
+    """
+    # If pptextract already did the heavy lifting
+    if isinstance(extract_res.get("cv"), dict):
+        return {"cv": extract_res["cv"]}
+
+    # try common keys
+    for k in ("slides_text", "raw", "text", "content"):
+        if k in extract_res and extract_res[k]:
+            return {"text": extract_res[k], "extracted": extract_res}
+
+    # If unknown shape, pass the entire object under "extracted"
+    return {"extracted": extract_res}
 
 
-# --------- MAIN ORCHESTRATION ----------
+# =========================
+# Azure Function
+# =========================
+
 def main(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Request body (JSON):
-      {
-        "pptx_blob": "somefile.pptx",          # REQUIRED, inside COMING_CONTAINER
-        "out_pdf_name": "CV_Foo.pdf",          # OPTIONAL (default derived from name)
-        "proofread": true,                     # OPTIONAL, passed to cvnormalize
-        "keep_raw": true,                      # OPTIONAL, let pptxextract persist raw JSON to blob
-        "keep_normalized": true,               # OPTIONAL, let cvnormalize persist normalized JSON
-        "return_urls_only": true,              # OPTIONAL
-        "cv_template_name": "cv_template.html" # NOTE: renderer uses env CV_TEMPLATE_NAME; keep here for trace
-      }
+    Orchestrator: pptextract -> cvnormalize -> renderpdf_html
 
-    Response (JSON):
+    POST body supports:
       {
-        "ok": true,
-        "steps": {
-          "pptxextract": {...},
-          "cvnormalize": {...},
-          "renderpdf_html": {...}
-        },
-        "artifacts": {
-          "raw_json_blob": "...",
-          "raw_json_url": "...",
-          "normalized_blob": "...",
-          "normalized_url": "...",
-          "pdf_blob": "...",
-          "pdf_url": "..."
-        }
+        "file_name": "cv.pdf",
+        "pptx_blob": "mycv.pptx",           # blob name inside COMING_CONTAINER
+        "pptx_url": "https://...",          # optional alternative
+        "pptx_base64": "<...>",             # optional alternative
+        "pptx_name": "input.pptx",          # optional name when staging url/base64
+        "template": "cv_europass.html",     # optional; renderpdf_html respects CV_TEMPLATE_NAME too
+        "return": "url"                     # optional hint; renderer may return url or base64
       }
     """
-    logging.info("cvagent: request received")
+    if req.method != "POST":
+        return func.HttpResponse("POST only", status_code=405)
+
     try:
-        _assert_config()
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse("Invalid JSON", status_code=400)
 
+    file_name = (body.get("file_name") or "cv.pdf").strip()
+    template_name = body.get("template")  # None means renderer default
+    want = (body.get("return") or "").lower()  # optional preference
+
+    pptx_blob = body.get("pptx_blob")
+    pptx_url = body.get("pptx_url")
+    pptx_b64 = body.get("pptx_base64")
+    pptx_name = body.get("pptx_name")
+
+    # If no blob name provided, stage from URL / base64 (if given)
+    if not pptx_blob:
         try:
-            body = req.get_json()
-        except Exception:
-            return func.HttpResponse("Invalid JSON body", status_code=400)
-
-        pptx_blob       = body.get("pptx_blob")
-        if not pptx_blob:
-            return func.HttpResponse("Missing 'pptx_blob' (name inside COMING_CONTAINER).", status_code=400)
-
-        out_pdf_name    = body.get("out_pdf_name") or os.path.splitext(os.path.basename(pptx_blob))[0] + ".pdf"
-        proofread       = bool(body.get("proofread", False))
-        keep_raw        = bool(body.get("keep_raw", True))
-        keep_normalized = bool(body.get("keep_normalized", True))
-        return_urls_only= bool(body.get("return_urls_only", False))
-        cv_template_name= body.get("cv_template_name")  # informational; renderer reads env
-
-        steps: Dict[str, Any] = {}
-        artifacts: Dict[str, Optional[str]] = {
-            "raw_json_blob": None,
-            "raw_json_url": None,
-            "normalized_blob": None,
-            "normalized_url": None,
-            "pdf_blob": None,
-            "pdf_url": None
-        }
-
-        # ---- STEP 1: EXTRACT PPTX ----
-        logging.info("cvagent: calling /api/pptxextract")
-        extract_payload = {
-            "container": COMING_CONTAINER,
-            "blob": pptx_blob,
-            # prefer both: keep to blob, and also return inline to reduce hops
-            "keep_raw": keep_raw,
-            "return_inline": True
-        }
-        ext = _call_func("/api/pptxextract", extract_payload)
-        steps["pptxextract"] = ext
-
-        # Retrieve raw JSON (inline or blob), and optional URLs
-        raw_inline = ext.get("raw") or ext.get("raw_json")
-        raw_blob   = _first_non_empty(ext.get("raw_blob"), ext.get("raw_json_blob"))
-        raw_url    = _first_non_empty(
-            ext.get("url"), ext.get("raw_url"),
-            _compose_blob_url(STORAGE_JSON_BASE, raw_blob) if raw_blob else None
-        )
-        artifacts["raw_json_blob"] = raw_blob
-        artifacts["raw_json_url"]  = raw_url
-
-        if not (raw_inline or raw_blob or raw_url):
-            raise StepError("pptxextract returned no raw JSON (neither inline nor blob/url).")
-
-        # ---- STEP 2: NORMALIZE ----
-        logging.info("cvagent: calling /api/cvnormalize")
-        norm_payload: Dict[str, Any] = {
-            "proofread": proofread,
-            "keep_normalized": keep_normalized
-        }
-        # Pass whichever raw we have
-        if raw_inline:
-            norm_payload["raw"] = raw_inline
-        if raw_blob:
-            norm_payload["raw_blob"] = raw_blob
-            norm_payload["raw_container"] = JSON_PARSED_CONTAINER  # if extractor wrote raw there
-        if raw_url:
-            norm_payload["raw_url"] = raw_url
-
-        norm = _call_func("/api/cvnormalize", norm_payload)
-        steps["cvnormalize"] = norm
-
-        # Retrieve normalized CV (inline or blob/url)
-        cv_inline  = _first_non_empty(norm.get("cv"), norm.get("normalized"))
-        cv_blob    = _first_non_empty(norm.get("cv_blob"), norm.get("normalized_blob"))
-        cv_url     = _first_non_empty(
-            norm.get("url"), norm.get("normalized_url"),
-            _compose_blob_url(STORAGE_JSON_BASE, cv_blob) if cv_blob else None
-        )
-        artifacts["normalized_blob"] = cv_blob
-        artifacts["normalized_url"]  = cv_url
-
-        if not (cv_inline or cv_blob or cv_url):
-            raise StepError("cvnormalize returned no normalized CV (neither inline nor blob/url).")
-
-        # ---- STEP 3: RENDER (HTML/CSS → PDF with Playwright) ----
-        logging.info("cvagent: calling /api/renderpdf_html")
-        render_payload: Dict[str, Any] = {
-            "file_name": out_pdf_name
-        }
-        # Prefer inline CV if available (fastest path)
-        if cv_inline:
-            render_payload["cv"] = cv_inline
+            staged = _stage_blob_from_url_or_b64(pptx_url, pptx_b64, pptx_name)
+        except Exception as e:
+            return func.HttpResponse(f"Unable to stage PPTX: {e}", status_code=400)
+        if staged:
+            pptx_blob = staged
         else:
-            # If no inline CV, try to let the renderer fetch it if your renderer supports it.
-            # (The provided renderpdf_html expects inline 'cv', so safest is to fetch normalized JSON now.)
-            # If cv_url exists, pull it, else if cv_blob exists + JSON SAS base, pull via composed URL.
-            cv_src_url = cv_url or (_compose_blob_url(STORAGE_JSON_BASE, cv_blob) if cv_blob else None)
-            if not cv_src_url:
-                raise StepError("Renderer requires inline 'cv'; no accessible normalized JSON URL available.")
-            try:
-                rj = requests.get(cv_src_url, timeout=30)
-                rj.raise_for_status()
-                render_payload["cv"] = rj.json()
-            except Exception as e:
-                raise StepError(f"Failed to download normalized JSON for renderer: {e}")
+            return func.HttpResponse("Missing 'pptx_blob' (name inside COMING_CONTAINER), or provide 'pptx_url'/'pptx_base64'.", status_code=400)
 
-        rnd = _call_func("/api/renderpdf_html", render_payload)
-        steps["renderpdf_html"] = rnd
-
-        pdf_blob = rnd.get("pdf_blob") or out_pdf_name
-        pdf_url  = rnd.get("url") or _compose_blob_url(PDF_OUT_BASE, pdf_blob)
-        artifacts["pdf_blob"] = pdf_blob
-        artifacts["pdf_url"]  = pdf_url
-
-        result = {
-            "ok": True,
-            "steps": steps if not return_urls_only else {},
-            "artifacts": artifacts
-        }
-        return func.HttpResponse(
-            json.dumps(result, ensure_ascii=False, indent=None),
-            status_code=200,
-            mimetype="application/json"
-        )
-
-    except StepError as e:
-        logging.exception("cvagent: step error")
-        return func.HttpResponse(json.dumps({"ok": False, "error": str(e)}), status_code=502, mimetype="application/json")
+    # 1) Extract from PPTX
+    extract_payload = {
+        "pptx_blob": pptx_blob,
+        # pass both keys so pptextract can read either naming
+        "container": COMING_CONTAINER,
+        "coming_container": COMING_CONTAINER
+    }
+    try:
+        extract_res = _http_call(PPTXEXTRACT_PATH, PPTXEXTRACT_KEY, extract_payload, TIMEOUT_EXTRACT)
     except Exception as e:
-        logging.exception("cvagent: fatal error")
-        return func.HttpResponse(json.dumps({"ok": False, "error": f"unexpected: {e}"}), status_code=500, mimetype="application/json")
+        logging.exception("pptextract failed")
+        return func.HttpResponse(f"pptextract error: {e}", status_code=502)
+
+    # 2) Normalize to CV JSON (skip if extract already returned 'cv')
+    norm_input = _extract_to_cv_or_text(extract_res)
+    if "cv" not in norm_input:
+        try:
+            norm_res = _http_call(CVNORMALIZE_PATH, CVNORMALIZE_KEY, norm_input, TIMEOUT_NORMALIZE)
+        except Exception as e:
+            logging.exception("cvnormalize failed")
+            return func.HttpResponse(f"cvnormalize error: {e}", status_code=502)
+
+        cv = norm_res.get("cv") or norm_res.get("normalized") or norm_res.get("result")
+        if not isinstance(cv, dict):
+            # fall back: if cvnormalize echoed text, construct minimal CV
+            cv = {"personal_info": {}, "work_experience": [], "education": [], "skills_groups": [], "summary": norm_res}
+    else:
+        cv = norm_input["cv"]
+
+    # 3) Render PDF
+    render_payload = {"file_name": file_name, "cv": cv}
+    if template_name:
+        # our renderer inspects CV_TEMPLATE_NAME env, but also accepts 'template' in payload
+        render_payload["template"] = template_name
+    if want:
+        render_payload["return"] = want  # some renderers accept this hint
+
+    try:
+        render_res = _http_call(RENDER_PATH, RENDER_KEY, render_payload, TIMEOUT_RENDER)
+    except Exception as e:
+        logging.exception("renderpdf_html failed")
+        return func.HttpResponse(f"renderpdf_html error: {e}", status_code=502)
+
+    # Bubble up renderer response as-is so callers can read {url|content_base64}
+    return func.HttpResponse(json.dumps(render_res), status_code=200, mimetype="application/json")

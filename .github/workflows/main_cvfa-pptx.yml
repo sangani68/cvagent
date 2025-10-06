@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    # Build inside the SAME image Azure Functions uses → compatible wheels
+    # Build inside the SAME image Azure Functions uses → compatible wheels (no glibc issues)
     runs-on: ubuntu-latest
     container:
       image: mcr.microsoft.com/azure-functions/python:4-python3.10
@@ -15,17 +15,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify repo root (host.json + requirements.txt)
+      - name: Preflight (host.json + requirements.txt at repo root)
         run: |
           ls -la
           test -f host.json
           test -f requirements.txt
+          echo "requirements.txt (top):"
+          head -n 20 requirements.txt || true
 
-      - name: Vendor deps into .python_packages (inside Azure Functions image)
+      - name: Vendor deps into .python_packages (inside AF image)
         run: |
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
-          python -c "import jinja2; print('vendored jinja2', jinja2.__version__)"
+          # verify by adding .python_packages to PYTHONPATH
+          PYTHONPATH=.python_packages/lib/site-packages \
+          python -c "import jinja2, azure.functions, requests; print('vendored OK:', jinja2.__version__)"
 
       - name: Create deployment zip
         run: |
@@ -53,7 +57,7 @@ jobs:
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
-          app-name: "cvfa-pptx-acgjage0g8csb2cq"
-          package: "."
+          app-name: "cvfa-pptx-acgjage0g8csb2cq"               # your Function App
+          package: "."                                         # deploy the unzipped artifact
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
           respect-funcignore: true

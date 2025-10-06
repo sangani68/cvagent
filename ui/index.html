@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CV Agent – Upload → Edit → Export PDF</title>
+  <style>
+    :root{ --primary:#0F62FE; --ink:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#fff }
+    *{box-sizing:border-box}
+    body{margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:var(--ink); background:var(--bg)}
+    .wrap{max-width:1060px; margin:28px auto 80px; padding:0 16px}
+    h1{font-size:22px; margin:0 0 8px}
+    p{margin:0 0 12px; color:var(--muted)}
+    .card{border:1px solid var(--line); background:#fff; border-radius:12px; padding:16px; margin:12px 0; box-shadow:0 1px 2px rgba(0,0,0,.04)}
+    .row{display:grid; grid-template-columns: 1fr 1fr; gap:12px}
+    .row3{display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px}
+    label{display:block; font-size:12px; color:var(--muted); margin-bottom:6px}
+    input,textarea{width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit}
+    textarea{min-height:90px}
+    .btn{appearance:none; border:0; background:var(--primary); color:#fff; padding:10px 14px; border-radius:10px; font-weight:700; cursor:pointer}
+    .btn.secondary{background:#1118270d; color:#111827}
+    .btn:disabled{opacity:.6; cursor:not-allowed}
+    .toolbar{display:flex; flex-wrap:wrap; gap:8px}
+    .section{margin:18px 0 8px}
+    .title{font-weight:700; margin:14px 0 6px}
+    .subtle{color:var(--muted)}
+    .grid{display:grid; gap:8px}
+    .grid2{grid-template-columns:1fr 1fr}
+    .grid3{grid-template-columns:1fr 1fr 1fr}
+    .list{display:grid; gap:12px}
+    .item{border:1px dashed var(--line); border-radius:10px; padding:12px}
+    .hr{height:1px; background:var(--line); margin:14px 0}
+    .log{background:#0b1020; color:#d1d5db; font:12px/1.45 ui-monospace,Menlo,Consolas; padding:12px; border-radius:8px; max-height:240px; overflow:auto}
+    .pill{display:inline-block; padding:.2rem .5rem; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px}
+    .right{ text-align:right }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>CV Agent</h1>
+    <p>Upload a PPTX → extract & normalize → edit → export a Europass-style PDF.</p>
+
+    <!-- Settings -->
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Function App Base URL</label>
+          <input id="baseUrl" value="/" />
+        </div>
+        <div>
+          <label>Function/Host Key (x-functions-key)</label>
+          <input id="funcKey" placeholder="paste your key" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>cvagent route</label>
+          <input id="cvagentPath" value="api/cvagent" />
+        </div>
+        <div>
+          <label>renderpdf_html route</label>
+          <input id="renderPath" value="api/renderpdf_html" />
+        </div>
+      </div>
+      <p class="subtle" style="margin-top:8px">Tip: If you serve this page from the same Function App (e.g. <code>wwwroot/ui/index.html</code>) keep Base URL as <code>/</code>. Otherwise set full https://&lt;app&gt;.azurewebsites.net and enable CORS for your origin.</p>
+    </div>
+
+    <!-- Step 1: Upload & Extract -->
+    <div class="card">
+      <div class="title">1) Upload PPTX and extract</div>
+      <div class="row">
+        <div>
+          <label>Select PPTX</label>
+          <input type="file" id="pptxFile" accept=".pptx" />
+        </div>
+        <div>
+          <label>Output PDF file name</label>
+          <input id="outName" value="cv-from-pptx.pdf" />
+        </div>
+      </div>
+      <div class="toolbar" style="margin-top:12px">
+        <button class="btn" id="btnExtract">Extract → Normalize</button>
+        <button class="btn secondary" id="btnLoadSample" type="button">Load sample CV</button>
+      </div>
+      <div id="extractLog" class="log" style="margin-top:10px; display:none"></div>
+    </div>
+
+    <!-- Step 2: Edit CV -->
+    <div class="card">
+      <div class="title">2) Review & edit CV fields</div>
+      <div class="grid grid2">
+        <div>
+          <label>Full name</label>
+          <input id="pi_full_name" />
+        </div>
+        <div>
+          <label>Headline</label>
+          <input id="pi_headline" />
+        </div>
+        <div>
+          <label>Address</label>
+          <input id="pi_address" />
+        </div>
+        <div>
+          <label>City</label>
+          <input id="pi_city" />
+        </div>
+        <div>
+          <label>Country</label>
+          <input id="pi_country" />
+        </div>
+        <div>
+          <label>Email</label>
+          <input id="pi_email" />
+        </div>
+        <div>
+          <label>Phone</label>
+          <input id="pi_phone" />
+        </div>
+        <div>
+          <label>Website</label>
+          <input id="pi_website" />
+        </div>
+        <div>
+          <label>LinkedIn</label>
+          <input id="pi_linkedin" />
+        </div>
+        <div>
+          <label>Nationality</label>
+          <input id="pi_nationality" />
+        </div>
+        <div>
+          <label>Date of Birth</label>
+          <input id="pi_dob" />
+        </div>
+        <div>
+          <label>Gender</label>
+          <input id="pi_gender" />
+        </div>
+      </div>
+      <div class="section">
+        <label>Summary / About</label>
+        <textarea id="cv_summary"></textarea>
+      </div>
+
+      <div class="section">
+        <div class="title">Skills groups <span class="subtle">(comma-separated items)</span></div>
+        <div id="skillsList" class="list"></div>
+        <div class="toolbar"><button class="btn secondary" type="button" id="addSkillGrp">+ Add group</button></div>
+      </div>
+
+      <div class="section">
+        <div class="title">Work experience</div>
+        <div id="workList" class="list"></div>
+        <div class="toolbar"><button class="btn secondary" type="button" id="addJob">+ Add job</button></div>
+      </div>
+
+      <div class="section">
+        <div class="title">Education</div>
+        <div id="eduList" class="list"></div>
+        <div class="toolbar"><button class="btn secondary" type="button" id="addEdu">+ Add education</button></div>
+      </div>
+
+      <div class="section">
+        <div class="title">Languages</div>
+        <div id="langList" class="list"></div>
+        <div class="toolbar"><button class="btn secondary" type="button" id="addLang">+ Add language</button></div>
+      </div>
+    </div>
+
+    <!-- Step 3: Export -->
+    <div class="card">
+      <div class="title">3) Export PDF</div>
+      <div class="toolbar">
+        <button class="btn" id="btnExport">Export PDF</button>
+        <div id="exportStatus" class="subtle" style="margin-left:8px"></div>
+      </div>
+      <div class="hr"></div>
+      <div class="row">
+        <div>
+          <div><span class="pill">Blob link</span></div>
+          <div id="blobLink" style="margin-top:8px"></div>
+        </div>
+        <div class="right">
+          <div><span class="pill">Local download</span></div>
+          <div id="localLink" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="title">Logs</div>
+      <pre class="log" id="log"></pre>
+    </div>
+  </div>
+
+<script>
+  // ====== State ======
+  let currentCV = {
+    personal_info: {}, work_experience: [], education: [], skills_groups: [], languages: [], summary:""
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  const xlog = (...args) => { const s = args.map(a => (typeof a === 'string'? a: JSON.stringify(a,null,2))).join(' '); logEl.textContent += s + "\n"; logEl.scrollTop = logEl.scrollHeight; }
+
+  function baseUrl(){
+    const v = $("baseUrl").value.trim();
+    return v.endsWith("/") ? v : v + "/";
+  }
+  function headers(){
+    const key = $("funcKey").value.trim();
+    const h = { 'Content-Type': 'application/json' };
+    if(key) h['x-functions-key'] = key;
+    return h;
+  }
+
+  // ====== UI builders ======
+  function el(tag, attrs={}, ...children){
+    const e = document.createElement(tag);
+    for(const [k,v] of Object.entries(attrs)){
+      if(k === 'class') e.className = v; else if(k==='value') e.value = v; else e.setAttribute(k,v);
+    }
+    for(const c of children){ if(typeof c === 'string') e.appendChild(document.createTextNode(c)); else if(c) e.appendChild(c); }
+    return e;
+  }
+
+  function skillsItem(grp={group:"", items:[]}){
+    const wrap = el('div',{class:'item'});
+    const g = el('input',{value: grp.group || '', placeholder:'Group (e.g., Tech)'});
+    const it = el('input',{value: (grp.items||[]).join(', '), placeholder:'Items (comma separated)'});
+    wrap.appendChild(el('label',{},'Group')); wrap.appendChild(g);
+    wrap.appendChild(el('label',{},'Items')); wrap.appendChild(it);
+    wrap.dataset.type = 'skill';
+    wrap._get = () => ({ group: g.value.trim(), items: it.value.split(',').map(s=>s.trim()).filter(Boolean) });
+    return wrap;
+  }
+
+  function jobItem(job={}){
+    const wrap = el('div',{class:'item'});
+    const title = el('input',{value: job.title||'', placeholder:'Title'});
+    const company = el('input',{value: job.company||'', placeholder:'Company'});
+    const location = el('input',{value: job.location||'', placeholder:'Location'});
+    const sd = el('input',{value: job.start_date||'', placeholder:'Start'});
+    const ed = el('input',{value: job.end_date||'', placeholder:'End or Present'});
+    const desc = el('textarea',{placeholder:'Description'}); desc.value = job.description||'';
+    const bullets = el('textarea',{placeholder:'Bullets (one per line)'}); bullets.value = (job.bullets||[]).join('\n');
+    wrap.append(
+      el('label',{},'Title'), title,
+      el('label',{},'Company'), company,
+      el('label',{},'Location'), location,
+      el('div',{class:'row'}, el('div',{}, el('label',{},'Start'), sd), el('div',{}, el('label',{},'End'), ed)),
+      el('label',{},'Description'), desc,
+      el('label',{},'Bullets'), bullets
+    );
+    wrap.dataset.type='job';
+    wrap._get = () => ({
+      title:title.value.trim(), company:company.value.trim(), location:location.value.trim(),
+      start_date:sd.value.trim(), end_date:ed.value.trim(), description:desc.value.trim(),
+      bullets: bullets.value.split('\n').map(s=>s.trim()).filter(Boolean)
+    });
+    return wrap;
+  }
+
+  function eduItem(e={}){
+    const wrap = el('div',{class:'item'});
+    const degree = el('input',{value:e.degree||e.title||'', placeholder:'Degree / Title'});
+    const inst = el('input',{value:e.institution||'', placeholder:'Institution'});
+    const location = el('input',{value:e.location||'', placeholder:'Location'});
+    const sd = el('input',{value:e.start_date||'', placeholder:'Start'});
+    const ed = el('input',{value:e.end_date||'', placeholder:'End'});
+    const details = el('textarea',{placeholder:'Details'}); details.value = e.details||'';
+    wrap.append(
+      el('label',{},'Degree / Title'), degree,
+      el('label',{},'Institution'), inst,
+      el('label',{},'Location'), location,
+      el('div',{class:'row'}, el('div',{}, el('label',{},'Start'), sd), el('div',{}, el('label',{},'End'), ed)),
+      el('label',{},'Details'), details
+    );
+    wrap.dataset.type='edu';
+    wrap._get = () => ({ degree:degree.value.trim(), title:degree.value.trim(), institution:inst.value.trim(), location:location.value.trim(), start_date:sd.value.trim(), end_date:ed.value.trim(), details:details.value.trim() });
+    return wrap;
+  }
+
+  function langItem(l={}){
+    const wrap = el('div',{class:'item'});
+    const name = el('input',{value:l.name||l.language||l.lang||'', placeholder:'Language'});
+    const level = el('input',{value:l.level||'', placeholder:'Level (e.g., B2, C1)'});
+    wrap.append(
+      el('label',{},'Language'), name,
+      el('label',{},'Level'), level
+    );
+    wrap.dataset.type='lang';
+    wrap._get = () => ({ name:name.value.trim(), level:level.value.trim() });
+    return wrap;
+  }
+
+  function fillForm(cv){
+    currentCV = cv || currentCV;
+    const pi = currentCV.personal_info || {};
+    $("pi_full_name").value = pi.full_name||'';
+    $("pi_headline").value = pi.headline||'';
+    $("pi_address").value = pi.address||'';
+    $("pi_city").value = pi.city||'';
+    $("pi_country").value = pi.country||'';
+    $("pi_email").value = pi.email||'';
+    $("pi_phone").value = pi.phone||'';
+    $("pi_website").value = pi.website||'';
+    $("pi_linkedin").value = pi.linkedin||'';
+    $("pi_nationality").value = pi.nationality||'';
+    $("pi_dob").value = pi.date_of_birth||'';
+    $("pi_gender").value = pi.gender||'';
+    $("cv_summary").value = currentCV.summary || currentCV.about || (pi.summary||'');
+
+    const skillsList = $("skillsList"); skillsList.innerHTML='';
+    (currentCV.skills_groups||[]).forEach(g => skillsList.appendChild(skillsItem(g)));
+
+    const workList = $("workList"); workList.innerHTML='';
+    (currentCV.work_experience||[]).forEach(j => workList.appendChild(jobItem(j)));
+
+    const eduList = $("eduList"); eduList.innerHTML='';
+    (currentCV.education||[]).forEach(e => eduList.appendChild(eduItem(e)));
+
+    const langList = $("langList"); langList.innerHTML='';
+    (currentCV.languages||[]).forEach(l => langList.appendChild(langItem(l)));
+  }
+
+  function collectCV(){
+    const cv = {
+      personal_info: {
+        full_name: $("pi_full_name").value.trim(),
+        headline: $("pi_headline").value.trim(),
+        address: $("pi_address").value.trim(),
+        city: $("pi_city").value.trim(),
+        country: $("pi_country").value.trim(),
+        email: $("pi_email").value.trim(),
+        phone: $("pi_phone").value.trim(),
+        website: $("pi_website").value.trim(),
+        linkedin: $("pi_linkedin").value.trim(),
+        nationality: $("pi_nationality").value.trim(),
+        date_of_birth: $("pi_dob").value.trim(),
+        gender: $("pi_gender").value.trim(),
+        summary: $("cv_summary").value.trim()
+      },
+      summary: $("cv_summary").value.trim(),
+      work_experience: [], education: [], skills_groups: [], languages: []
+    };
+
+    // skills
+    for(const node of $("skillsList").children){ if(node._get) cv.skills_groups.push(node._get()); }
+    // work
+    for(const node of $("workList").children){ if(node._get) cv.work_experience.push(node._get()); }
+    // edu
+    for(const node of $("eduList").children){ if(node._get) cv.education.push(node._get()); }
+    // lang
+    for(const node of $("langList").children){ if(node._get) cv.languages.push(node._get()); }
+
+    return cv;
+  }
+
+  // ====== Network helpers ======
+  async function extractNormalizeFromPptx(file){
+    // read as base64
+    const dataUrl = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(file); });
+    const b64 = String(dataUrl).split(',')[1];
+    const payload = {
+      pptx_base64: b64,
+      pptx_name: file.name,
+      mode: "normalize_only"
+    };
+    const url = baseUrl() + $("cvagentPath").value.replace(/^\/*/,'');
+    $("extractLog").style.display='block';
+    $("extractLog").textContent = 'Uploading and extracting...';
+    const resp = await fetch(url, { method:'POST', headers: headers(), body: JSON.stringify(payload) });
+    const text = await resp.text();
+    let data;
+    try { data = JSON.parse(text);} catch{ data = { raw:text }; }
+    xlog('cvagent normalize_only →', data);
+    if(!resp.ok){ throw new Error(data && data.error ? data.error : text); }
+    // expected { cv: {...} } or similar
+    const cv = data.cv || data.normalized || data.result || data;
+    if(!cv || typeof cv !== 'object') throw new Error('No CV object returned from normalize step.');
+    return cv;
+  }
+
+  async function renderPdf(cv, outName){
+    const url = baseUrl() + $("renderPath").value.replace(/^\/*/,'');
+    const body = { file_name: outName || 'cv.pdf', cv: cv };
+    $("exportStatus").textContent = 'Rendering...';
+    const resp = await fetch(url, { method:'POST', headers: headers(), body: JSON.stringify(body) });
+    const text = await resp.text();
+    let data;
+    try{ data = JSON.parse(text);} catch{ data = { raw:text }; }
+    xlog('renderpdf_html →', data);
+    if(!resp.ok){ throw new Error(text); }
+    return data;
+  }
+
+  function downloadFromBase64(b64, filename){
+    const bytes = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
+    const blob = new Blob([bytes], {type:'application/pdf'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = filename || 'cv.pdf'; a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function downloadFromUrlToFile(url, filename){
+    const resp = await fetch(url);
+    const blob = await resp.blob();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename || 'cv.pdf'; a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ====== Events ======
+  $("btnExtract").addEventListener('click', async ()=>{
+    const f = $("pptxFile").files[0];
+    if(!f){ alert('Choose a PPTX first'); return; }
+    try{
+      const cv = await extractNormalizeFromPptx(f);
+      fillForm(cv);
+      $("extractLog").textContent = 'Extraction done. You can edit below.';
+    }catch(err){ $("extractLog").textContent = 'Error: ' + err.message; xlog(err.message); }
+  });
+
+  $("btnLoadSample").addEventListener('click', ()=>{
+    const sample = {
+      personal_info:{ full_name:'Ada Lovelace', headline:'Computing Pioneer', city:'London', country:'UK', email:'ada@example.com', linkedin:'linkedin.com/in/ada' },
+      summary:'Visionary mathematician; wrote the first algorithm intended to be carried out by a machine.',
+      skills_groups:[{group:'Tech', items:['Analysis','Algorithms','Mathematics']}],
+      work_experience:[{title:'Analyst', company:'Analytical Engine', start_date:'1842', end_date:'1852', bullets:['Translated Menabrea, added extensive Notes','Conceptualized loop and subroutine']}],
+      education:[{degree:'Self-taught Mathematics', institution:'Private tutelage', start_date:'1830', end_date:'1840'}],
+      languages:[{name:'English', level:'Native'}]
+    };
+    fillForm(sample);
+  });
+
+  $("addSkillGrp").addEventListener('click', ()=>{
+    $("skillsList").appendChild(skillsItem({group:'',items:[]}));
+  });
+  $("addJob").addEventListener('click', ()=>{
+    $("workList").appendChild(jobItem({}));
+  });
+  $("addEdu").addEventListener('click', ()=>{
+    $("eduList").appendChild(eduItem({}));
+  });
+  $("addLang").addEventListener('click', ()=>{
+    $("langList").appendChild(langItem({}));
+  });
+
+  $("btnExport").addEventListener('click', async ()=>{
+    const out = $("outName").value.trim() || 'cv.pdf';
+    try{
+      const cv = collectCV();
+      const res = await renderPdf(cv, out);
+      $("exportStatus").textContent = 'Done.';
+      // Blob link
+      if(res.url){
+        $("blobLink").innerHTML = `<a href="${res.url}" target="_blank">Open in blob (URL)</a>`;
+        // also offer local download by fetching the URL
+        $("localLink").innerHTML = '';
+        const a = el('a', {href:'#', class:'btn secondary'}, 'Download locally');
+        a.addEventListener('click', async (e)=>{ e.preventDefault(); await downloadFromUrlToFile(res.url, out); });
+        $("localLink").appendChild(a);
+      } else if(res.content_base64){
+        $("blobLink").textContent = 'No blob URL returned (check PDF_OUT_BASE).';
+        const a = el('a',{href:'#', class:'btn secondary'}, 'Download PDF');
+        a.addEventListener('click', (e)=>{ e.preventDefault(); downloadFromBase64(res.content_base64, out); });
+        $("localLink").innerHTML=''; $("localLink").appendChild(a);
+      } else {
+        $("blobLink").textContent = 'No URL/content in response';
+        $("localLink").textContent = '';
+      }
+    }catch(err){
+      $("exportStatus").textContent = 'Error: ' + err.message;
+      xlog('Export error:', err.message);
+    }
+  });
+
+  // Try to infer base URL if served under app domain
+  window.addEventListener('load', ()=>{
+    if(location.hostname.endsWith('.azurewebsites.net')){
+      $("baseUrl").value = location.origin + '/';
+    }
+  });
+</script>
+</body>
+</html>

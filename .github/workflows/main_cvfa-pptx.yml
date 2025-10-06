@@ -1,10 +1,23 @@
-- name: Deploy to Azure Functions (Oryx remote build)
-  uses: Azure/functions-action@v1
-  with:
-    app-name: cvfa-pptx-acgjage0g8csb2cq
-    package: .
-    publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-    scm-do-build-during-deployment: true
-    enable-oryx-build: true
-    remote-build: true
-    respect-funcignore: true
+name: Deploy Azure Functions (Python)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to Azure Functions (Oryx remote build)
+        uses: Azure/functions-action@v1
+        with:
+          app-name: "cvfa-pptx-acgjage0g8csb2cq"
+          package: "."
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
+          respect-funcignore: true

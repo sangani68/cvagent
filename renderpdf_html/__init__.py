@@ -1,140 +1,220 @@
-import json, os, io, base64, tempfile
-import azure.functions as func
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+import os
+import json
+import base64
 from datetime import datetime
-from azure.storage.blob import BlobServiceClient
-from playwright.sync_api import sync_playwright
+from typing import Tuple, Optional
 
-# ---- Config from env ----
-STORAGE_CONN = os.getenv("AzureWebJobsStorage")  # or a dedicated connection string
-PDF_OUT_CONTAINER = os.getenv("PDF_OUT_CONTAINER", "pdf-out")
-TEMPLATES_CONTAINER = os.getenv("TEMPLATES_CONTAINER", "templates")
-LOCAL_TEMPLATE_DIR = os.getenv("LOCAL_TEMPLATE_DIR", "/site/wwwroot/templates")
-TEMPLATE_NAME = os.getenv("CV_TEMPLATE_NAME", "cv_template.html")
-PDF_PRIMARY_RGB = os.getenv("PDF_PRIMARY_RGB", "")  # e.g. "15,98,254"
-PDF_FILE_PREFIX = os.getenv("PDF_FILE_PREFIX", "CV_")
+import azure.functions as func
+from jinja2 import Environment, FileSystemLoader, select_autoescape, TemplateError
 
-# Optional: use Blob template first, fallback to local
-PREFER_BLOB_TEMPLATE = os.getenv("PREFER_BLOB_TEMPLATE", "false").lower() == "true"
+# Optional: upload to blob
+try:
+    from azure.storage.blob import BlobServiceClient
+except Exception:  # pragma: no cover
+    BlobServiceClient = None
 
-def _accent_to_css(rgb_str: str) -> str:
+# ---- Helpers -----------------------------------------------------------------
+
+def _parse_primary_color() -> Tuple[str, Tuple[int, int, int]]:
+    """
+    Reads PDF_PRIMARY_RGB as 'r,g,b' (e.g. '15,98,254').
+    Returns (hex '#RRGGBB', (r,g,b)). Default: 15,98,254 (#0F62FE).
+    """
+    raw = os.getenv("PDF_PRIMARY_RGB", "15,98,254")
     try:
-        if not rgb_str: return None
-        r,g,b = [int(x.strip()) for x in rgb_str.split(",")]
-        return f"rgb({r},{g},{b})"
+        r, g, b = [int(x.strip()) for x in raw.split(",")]
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
     except Exception:
-        return None
+        r, g, b = (15, 98, 254)  # safe default
+    hexcolor = f"#{r:02X}{g:02X}{b:02X}"
+    return hexcolor, (r, g, b)
 
-def _load_template_from_blob(bsc) -> str | None:
-    try:
-        blob = bsc.get_blob_client(container=TEMPLATES_CONTAINER, blob=TEMPLATE_NAME)
-        data = blob.download_blob().readall()
-        return data.decode("utf-8")
-    except Exception:
-        return None
 
-def _ensure_playwright_installed():
-    # On first cold start, ensure chromium is present. Safe no-op if already installed.
-    try:
-        import shutil, subprocess
-        if shutil.which("playwright") is None:
-            return
-        # check if chromium is installed by looking for .local-browsers marker
-        browsers_dir = os.path.expanduser("~/.cache/ms-playwright")
-        if not os.path.exists(browsers_dir) or not any("chromium" in d for d in os.listdir(browsers_dir)):
-            subprocess.run(["playwright", "install", "chromium"], check=True)
-    except Exception:
-        # don't crash if install check fails; Playwright may still work
-        pass
+def _normalize_list(val):
+    return val if isinstance(val, list) else []
 
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        payload = req.get_json()
-    except Exception:
-        return func.HttpResponse("Invalid JSON", status_code=400)
 
-    # Expected: normalized CV JSON from cvnormalize
-    cv = payload.get("cv") or payload
-    if not isinstance(cv, dict):
-        return func.HttpResponse("Missing 'cv' object with normalized data", status_code=400)
+def _normalize_cv(cv: dict) -> dict:
+    """
+    Make the template resilient: always pass lists / list-of-dicts
+    and support either list-of-dicts or dict forms for skills.
+    """
+    cv = cv or {}
 
-    file_name = payload.get("file_name") or f"{PDF_FILE_PREFIX}{cv.get('personal_info', {}).get('full_name','CV')}.pdf"
-    file_name = file_name.replace("/", "_").replace("\\", "_")
+    # Basic sections as lists
+    for k in ("work_experience", "education"):
+        cv[k] = _normalize_list(cv.get(k))
 
-    # Accent color
-    accent_css = _accent_to_css(PDF_PRIMARY_RGB) or None
+    # Skills: accept dict {"Tech":[...]} or list-of-dicts [{"group":"Tech","items":[...]}]
+    sg = cv.get("skills_groups")
+    if isinstance(sg, dict):
+        cv["skills_groups"] = [{"group": k, "items": (v or [])} for k, v in sg.items()]
+    elif isinstance(sg, list):
+        norm = []
+        for x in sg:
+            if isinstance(x, dict):
+                norm.append({"group": x.get("group", ""), "items": x.get("items") or []})
+        cv["skills_groups"] = norm
+    else:
+        cv["skills_groups"] = []
 
-    # Prepare template
-    bsc = BlobServiceClient.from_connection_string(STORAGE_CONN)
-    html_string = None
-    if PREFER_BLOB_TEMPLATE:
-        html_string = _load_template_from_blob(bsc)
+    # Languages (optional): accept list-of-dicts or dict of CEFR
+    langs = cv.get("languages") or cv.get("language_skills")
+    if isinstance(langs, list):
+        cv["languages"] = langs
+    elif isinstance(langs, dict):
+        # try to convert {"English": {"reading":"C1",...}, ...} to list-of-dicts
+        norm = []
+        for name, levels in langs.items():
+            if isinstance(levels, dict):
+                norm.append({"name": name, **levels})
+            else:
+                norm.append({"name": name, "level": str(levels)})
+        cv["languages"] = norm
+    else:
+        cv["languages"] = []
 
+    # Personal info scaffold
+    cv.setdefault("personal_info", {})
+    pi = cv["personal_info"]
+    pi.setdefault("full_name", "")
+    pi.setdefault("headline", "")
+    pi.setdefault("city", "")
+    pi.setdefault("country", "")
+    # optional
+    for opt in ("email", "phone", "address", "nationality", "date_of_birth", "gender", "website", "linkedin"):
+        pi.setdefault(opt, "")
+
+    return cv
+
+
+def _render_html(cv: dict, template_name: str, templates_dir: str) -> str:
+    primary_hex, primary_rgb = _parse_primary_color()
     env = Environment(
-        loader=FileSystemLoader(LOCAL_TEMPLATE_DIR),
-        autoescape=select_autoescape(["html", "xml"])
+        loader=FileSystemLoader(templates_dir),
+        autoescape=select_autoescape(["html", "xml"]),
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    template = env.get_template(template_name)
+    return template.render(
+        cv=cv,
+        theme={
+            "primary_hex": primary_hex,
+            "primary_rgb": primary_rgb,
+        },
+        now=datetime.utcnow(),
     )
 
-    if html_string:
-        template = env.from_string(html_string)
-    else:
-        try:
-            template = env.get_template(TEMPLATE_NAME)
-        except Exception as e:
-            return func.HttpResponse(f"Template not found: {TEMPLATE_NAME} ({e})", status_code=500)
 
-    # Render HTML with Jinja2
-    try:
-        html = template.render(accent_css=accent_css, **cv)
-    except Exception as e:
-        return func.HttpResponse(f"Template render error: {e}", status_code=500)
+def _html_to_pdf_bytes(html: str) -> bytes:
+    # Playwright must be in requirements.txt; Chromium will be fetched on first runs
+    from playwright.sync_api import sync_playwright
 
-    # Ensure Playwright browser
-    _ensure_playwright_installed()
-
-    # Generate PDF with Playwright
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(args=[
-                "--no-sandbox",
-                "--font-render-hinting=none",
-                "--disable-gpu",
-                "--disable-dev-shm-usage"
-            ])
-            page = browser.new_page()
-            # Use set_content so we don't rely on network access
-            page.set_content(html, wait_until="load")
-            pdf_bytes = page.pdf(
-                format="A4",
-                print_background=True,
-                margin={"top":"0.5in","right":"0.45in","bottom":"0.5in","left":"0.45in"}
-            )
-            browser.close()
-    except Exception as e:
-        return func.HttpResponse(f"Playwright PDF error: {e}", status_code=500)
-
-    # Upload to Blob
-    try:
-        blob = bsc.get_blob_client(container=PDF_OUT_CONTAINER, blob=file_name)
-        blob.upload_blob(pdf_bytes, overwrite=True, content_type="application/pdf")
-
-        # If you already have a SAS base (PDF_OUT_BASE) you can return a composed URL
-        sas_base = os.getenv("PDF_OUT_BASE")  # e.g., "https://<acct>.blob.core.windows.net/pdf-out?<SAS>"
-        if sas_base:
-            # For containers SAS, just append /{blob}
-            if "?" in sas_base:
-                base, qs = sas_base.split("?", 1)
-                url = f"{base.rstrip('/')}/{file_name}?{qs}"
-            else:
-                url = f"{sas_base.rstrip('/')}/{file_name}"
-        else:
-            # fallback: no SAS; return blob path only
-            url = f"{PDF_OUT_CONTAINER}/{file_name}"
-
-        return func.HttpResponse(
-            json.dumps({"pdf_blob": file_name, "url": url}),
-            status_code=200,
-            mimetype="application/json"
+    # Some environments require --no-sandbox
+    launch_args = ["--no-sandbox", "--disable-setuid-sandbox"]
+    pdf = b""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=launch_args)
+        context = browser.new_context()
+        page = context.new_page()
+        page.set_content(html, wait_until="load")
+        pdf = page.pdf(
+            format="A4",
+            print_background=True,
+            margin={"top": "14mm", "right": "14mm", "bottom": "14mm", "left": "14mm"},
         )
+        browser.close()
+    return pdf
+
+
+def _upload_pdf(file_name: str, data: bytes) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Uploads to blob if AzureWebJobsStorage + azure-storage-blob available.
+    Uses:
+      - PDF_OUT_CONTAINER (default 'pdf-out')
+      - PDF_OUT_BASE (optional SAS container URL like 'https://acct.blob.core.windows.net/pdf-out?sv=...')
+    Returns (blob_name, url_or_None)
+    """
+    conn_str = os.getenv("AzureWebJobsStorage")
+    container = os.getenv("PDF_OUT_CONTAINER", "pdf-out")
+    base = os.getenv("PDF_OUT_BASE")  # SAS container URL (optional)
+
+    if not (conn_str and BlobServiceClient):
+        return None, None
+
+    bsc = BlobServiceClient.from_connection_string(conn_str)
+    cc = bsc.get_container_client(container)
+    try:
+        cc.create_container()  # idempotent
+    except Exception:
+        pass
+    cc.upload_blob(name=file_name, data=data, overwrite=True, content_type="application/pdf")
+
+    url = None
+    if base and "?" in base:
+        # Build {container}/{blob}?SAS
+        container_url, sas = base.split("?", 1)
+        url = f"{container_url.rstrip('/')}/{file_name}?{sas}"
+    return file_name, url
+
+
+# ---- Azure Function entry -----------------------------------------------------
+
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    POST body:
+    {
+      "file_name": "mycv.pdf",
+      "cv": { ...normalized/un-normalized CV data... }
+    }
+    Returns JSON with either blob/url or base64 content.
+    """
+    if req.method != "POST":
+        return func.HttpResponse("POST only", status_code=405)
+
+    try:
+        payload = req.get_json()
+    except ValueError:
+        return func.HttpResponse("Invalid JSON", status_code=400)
+
+    file_name = (payload.get("file_name") or "cv.pdf").strip()
+    if not file_name.lower().endswith(".pdf"):
+        file_name += ".pdf"
+
+    cv = _normalize_cv(payload.get("cv") or {})
+
+    # Locate the template
+    here = os.path.dirname(__file__)
+    templates_dir = os.path.join(here, "templates")
+    template_name = os.getenv("CV_TEMPLATE_NAME", "cv_europass.html")
+
+    try:
+        html = _render_html(cv=cv, template_name=template_name, templates_dir=templates_dir)
+    except TemplateError as e:
+        line = getattr(e, "lineno", "?")
+        return func.HttpResponse(f"TemplateError (line {line}): {e}", status_code=500)
+
+    # Render to PDF
+    try:
+        pdf_bytes = _html_to_pdf_bytes(html)
     except Exception as e:
-        return func.HttpResponse(f"Blob upload error: {e}", status_code=500)
+        # On first cold run chromium might download; ask caller to retry once.
+        return func.HttpResponse(f"PDF render error: {e}", status_code=500)
+
+    # Try to upload to blob (if configured)
+    blob_name, url = _upload_pdf(file_name, pdf_bytes)
+
+    # Prefer returning URL; if not available, return base64 for convenience
+    if url:
+        body = {"ok": True, "pdf_blob": blob_name, "url": url}
+        return func.HttpResponse(json.dumps(body), status_code=200, mimetype="application/json")
+    else:
+        body = {
+            "ok": True,
+            "pdf_blob": file_name,
+            "content_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+        }
+        return func.HttpResponse(json.dumps(body), status_code=200, mimetype="application/json")

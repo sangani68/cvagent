@@ -13,7 +13,7 @@ FUNCS_BASE_URL = os.getenv("FUNCS_BASE_URL", "").rstrip("/")
 FUNCS_KEY      = os.getenv("FUNCS_KEY", "")
 TIMEOUT_S      = int(os.getenv("CVAGENT_HTTP_TIMEOUT", "180"))
 
-COMING_CONTAINER        = os.getenv("COMING_CONTAINER", "coming")
+COMING_CONTAINER        = os.getenv("COMING_CONTAINER", "incoming")
 JSON_PARSED_CONTAINER   = os.getenv("JSON_PARSED_CONTAINER", "json-parsed")
 PDF_OUT_CONTAINER       = os.getenv("PDF_OUT_CONTAINER", "pdf-out")
 

@@ -14,23 +14,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Preflight (host.json + requirements.txt at repo root)
+      - name: Verify required files
         run: |
           ls -la
           test -f host.json
           test -f requirements.txt
-          head -n 20 requirements.txt || true
+          test -f renderpdf_html/__init__.py
 
       - name: Install zip in container
         run: |
           apt-get update
           apt-get install -y zip
 
-      - name: Vendor deps into .python_packages (inside AF image)
+      - name: Vendor deps into .python_packages
         run: |
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
-          PYTHONPATH=.python_packages/lib/site-packages python -c "import jinja2; print('vendored OK:', jinja2.__version__)"
+
+      # Download Chromium into a folder we ship with the app (so no first-call download)
+      - name: Install Playwright browsers into artifact
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: pw-browsers
+        run: |
+          # ensure the vendored site-packages is visible to the playwright CLI
+          PYTHONPATH=.python_packages/lib/site-packages python -m playwright install chromium
+          # quick sanity check
+          find pw-browsers -maxdepth 4 -name headless_shell -print | sed -n '1,5p'
 
       - name: Create deployment zip
         run: |
@@ -57,6 +66,6 @@ jobs:
         uses: Azure/functions-action@v1
         with:
           app-name: "cvfa-pptx-acgjage0g8csb2cq"
-          package: "release.zip"   # deploy the zip directly
+          package: "release.zip"
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
           respect-funcignore: true

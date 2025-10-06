@@ -1,6 +1,8 @@
 import os
+import sys
 import json
 import base64
+import subprocess
 from datetime import datetime
 from typing import Tuple, Optional, List
 
@@ -15,7 +17,7 @@ except Exception:  # pragma: no cover
 
 
 # =============================================================================
-# Utilities
+# Helpers
 # =============================================================================
 
 def _parse_primary_color() -> Tuple[str, Tuple[int, int, int]]:
@@ -81,6 +83,8 @@ def _normalize_cv(cv: dict) -> dict:
     return cv
 
 
+# ---------- Template discovery (file-based, not loader-path dependent) --------
+
 def _template_search_dirs() -> List[str]:
     """
     Directory order:
@@ -115,19 +119,15 @@ def _template_search_dirs() -> List[str]:
 
 
 def _find_template_file(wanted: str) -> Optional[str]:
-    """
-    Return absolute path to the template if found (exact or case-insensitive),
-    else None.
-    """
-    search_dirs = _template_search_dirs()
+    """Return absolute path to template if found (exact or case-insensitive)."""
     # exact first
-    for d in search_dirs:
+    for d in _template_search_dirs():
         p = os.path.join(d, wanted)
         if os.path.isfile(p):
             return p
     # case-insensitive fallback
     lower = wanted.lower()
-    for d in search_dirs:
+    for d in _template_search_dirs():
         try:
             for fname in os.listdir(d):
                 if fname.lower() == lower and os.path.isfile(os.path.join(d, fname)):
@@ -150,23 +150,89 @@ def _render_html_from_file(cv: dict, filepath: str) -> str:
     return tpl.render(cv=cv, theme={"primary_hex": primary_hex, "primary_rgb": primary_rgb}, now=datetime.utcnow())
 
 
-def _html_to_pdf_bytes(html: str) -> bytes:
-    """HTML → PDF via Playwright Chromium."""
-    from playwright.sync_api import sync_playwright
-    args = ["--no-sandbox", "--disable-setuid-sandbox"]
-    with sync_playwright() as p:
-        browser = p.chromium.launch(args=args)
-        context = browser.new_context()
-        page = context.new_page()
-        page.set_content(html, wait_until="load")
-        pdf = page.pdf(
-            format="A4",
-            print_background=True,
-            margin={"top": "14mm", "right": "14mm", "bottom": "14mm", "left": "14mm"},
-        )
-        browser.close()
-    return pdf
+# ---------- Playwright helpers -------------------------------------------------
 
+def _has_chromium(path: str) -> bool:
+    """Detect if a Chromium 'headless_shell' exists somewhere under path."""
+    try:
+        for root, _, files in os.walk(path):
+            if "headless_shell" in files:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _ensure_playwright_browsers() -> str:
+    """
+    Ensure Chromium exists. If PLAYWRIGHT_BROWSERS_PATH points to a packaged
+    directory (read-only), we just use it. If missing, install Chromium into a
+    writable path (/home/site/pw-browsers) and return it.
+    """
+    app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    target = os.getenv("PLAYWRIGHT_BROWSERS_PATH")  # may be 'pw-browsers' (packaged) or abs path
+    if target:
+        # Convert relative to absolute (relative -> under app root)
+        if not os.path.isabs(target):
+            target = os.path.join(app_root, target)
+    else:
+        # Writable location outside run-from-package
+        target = "/home/site/pw-browsers"
+
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = target
+    os.makedirs(target, exist_ok=True)
+
+    if _has_chromium(target):
+        return target
+
+    # Try installing Chromium into 'target'
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    # Ensure our vendored packages are importable when running the CLI
+    env = os.environ.copy()
+    vendored = os.path.join(app_root, ".python_packages", "lib", "site-packages")
+    env["PYTHONPATH"] = f"{vendored}:{env.get('PYTHONPATH','')}"
+    proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Failed to install Playwright browsers: {proc.stderr or proc.stdout}")
+
+    return target
+
+
+def _html_to_pdf_bytes(html: str) -> bytes:
+    """
+    HTML → PDF using Playwright Chromium.
+    - First try render directly (works if browsers are already present).
+    - On 'Executable doesn't exist' error, install browsers to a writable path
+      and retry once.
+    """
+    from playwright.sync_api import sync_playwright
+
+    def render_once() -> bytes:
+        args = ["--no-sandbox", "--disable-setuid-sandbox"]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=args)
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_content(html, wait_until="load")
+            pdf_bytes = page.pdf(
+                format="A4",
+                print_background=True,
+                margin={"top": "14mm", "right": "14mm", "bottom": "14mm", "left": "14mm"},
+            )
+            browser.close()
+        return pdf_bytes
+
+    try:
+        return render_once()
+    except Exception as e:
+        msg = str(e)
+        if "Executable doesn't exist" in msg or "playwright install" in msg.lower():
+            _ensure_playwright_browsers()
+            return render_once()
+        raise
+
+
+# ---------- Blob upload --------------------------------------------------------
 
 def _upload_pdf(file_name: str, data: bytes) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -212,6 +278,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
       CV_TEMPLATE_NAME (default: cv_europass.html)
       CV_TEMPLATE_DIR  (optional search dir; abs or relative to /site/wwwroot)
       PDF_PRIMARY_RGB  (e.g., "15,98,254")
+      PLAYWRIGHT_BROWSERS_PATH (recommended: 'pw-browsers')
       AzureWebJobsStorage, PDF_OUT_CONTAINER, PDF_OUT_BASE (for blob upload)
     """
     if req.method != "POST":
@@ -229,11 +296,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     cv = _normalize_cv(payload.get("cv") or {})
 
-    # Find template file (robust, multi-dir)
+    # Find template file
     wanted = os.getenv("CV_TEMPLATE_NAME", "cv_europass.html")
     path = _find_template_file(wanted)
     if not path:
-        # Helpful listing
+        # Helpful listing to debug
         listings = []
         for d in _template_search_dirs():
             try:

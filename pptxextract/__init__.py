@@ -9,14 +9,14 @@ import requests
 import azure.functions as func
 from pptx import Presentation
 
-EMU_PER_PX = 9525  # approx at 96dpi
+EMU_PER_PX = 9525  # at ~96dpi
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", re.I)
 PHONE_RE = re.compile(r"(?:\+?\d[\d ()\-]{7,}\d)")
-URL_RE   = re.compile(r"(?:https?://|www\.)\S+", re.I)
+URL_RE   = re.compile(r"(?:(?:https?://)|(?:www\.))\S+", re.I)
 LINKEDIN_RE = re.compile(r"(?:linkedin\.com/[A-Za-z0-9_\-/]+)", re.I)
 
-def _px(v): return int(v / EMU_PER_PX)
+def _px(emu): return int(emu / EMU_PER_PX)
 
 def _download_pptx(ppt_blob_sas: str) -> bytes:
     r = requests.get(ppt_blob_sas, timeout=180)
@@ -24,15 +24,14 @@ def _download_pptx(ppt_blob_sas: str) -> bytes:
     return r.content
 
 def _text_from_textframe(tf) -> Tuple[List[str], Optional[float]]:
-    """Return lines + an approximate max font size seen (for title detection)."""
     lines: List[str] = []
     max_pt = None
     for p in tf.paragraphs:
-        text = "".join(run.text or "" for run in p.runs).strip()
-        if not text:
+        t = "".join(run.text or "" for run in p.runs).strip()
+        if not t:
             continue
         indent = "  " * (p.level or 0)
-        lines.append(indent + text)
+        lines.append(indent + t)
         for r in p.runs:
             try:
                 if r.font and r.font.size:
@@ -56,22 +55,25 @@ def _lines_from_table(tbl) -> List[str]:
             out.append(row_txt)
     return out
 
-def _extract_slide(slide) -> Dict[str, Any]:
+def _extract_slide(slide, slide_width_px: int) -> Dict[str, Any]:
     blocks: List[Dict[str, Any]] = []
     title_guess = None
     title_pt = 0.0
 
+    # column split (Europass often two columns)
+    left_cut = int(slide_width_px * 0.45)
+
     for sh in slide.shapes:
         left, top, width, height = _px(sh.left), _px(sh.top), _px(sh.width), _px(sh.height)
+        col = "left" if left + width/2 <= left_cut else "right"
 
-        # text box / placeholder
+        # text
         if getattr(sh, "has_text_frame", False) and sh.has_text_frame:
             lines, max_pt = _text_from_textframe(sh.text_frame)
             if not lines:
                 continue
             is_title = False
             try:
-                # placeholder title
                 if getattr(sh, "is_placeholder", False) and getattr(sh.placeholder_format, "type", None) == 1:
                     is_title = True
             except Exception:
@@ -80,6 +82,7 @@ def _extract_slide(slide) -> Dict[str, Any]:
                 title_pt, title_guess = max_pt, "\n".join(lines[:2])[:140]
             blocks.append({
                 "type": "text",
+                "col": col,
                 "lines": lines,
                 "bbox": [left, top, width, height],
                 "is_title": is_title
@@ -91,14 +94,14 @@ def _extract_slide(slide) -> Dict[str, Any]:
             if lines:
                 blocks.append({
                     "type": "table",
+                    "col": col,
                     "lines": lines,
                     "bbox": [left, top, width, height]
                 })
 
-    # sort blocks by reading order (top->bottom, left->right)
     blocks.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
 
-    # slide notes (often hold extra text)
+    # notes
     notes_text = None
     try:
         if getattr(slide, "notes_slide", None) and slide.notes_slide and slide.notes_slide.notes_text_frame:
@@ -108,18 +111,16 @@ def _extract_slide(slide) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # linear text view (kept for backward compat)
+    # linear text for recall
     linear: List[str] = []
     for b in blocks:
-        if b["type"] == "text":
-            linear.extend(b["lines"])
-        elif b["type"] == "table":
-            linear.extend(b["lines"])
+        prefix = "[L] " if b.get("col") == "left" else "[R] "
+        for ln in b["lines"]:
+            linear.append(prefix + ln)
     if notes_text:
-        linear.append("")
         linear.append(f"Notes: {notes_text}")
 
-    # detect a title
+    # title detection
     slide_title = None
     for b in blocks:
         if b.get("is_title"):
@@ -137,12 +138,12 @@ def _extract_slide(slide) -> Dict[str, Any]:
 
 def _gather_hints(all_text: str) -> Dict[str, List[str]]:
     emails = EMAIL_RE.findall(all_text) or []
-    phones = PHONE_RE.findall(all_text) or []
+    phones = [p.strip() for p in PHONE_RE.findall(all_text) or []]
     urls   = URL_RE.findall(all_text) or []
     linked = LINKEDIN_RE.findall(all_text) or []
     return {
         "emails": sorted(set(emails)),
-        "phones": sorted(set(p.strip() for p in phones)),
+        "phones": sorted(set(phones)),
         "urls":   sorted(set(urls)),
         "linkedin": sorted(set(linked))
     }
@@ -167,29 +168,29 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("Failed to open PPTX")
         return func.HttpResponse(f"Could not read PPTX: {e}", status_code=400)
 
+    slide_width_px  = _px(prs.slide_width)
     slides: List[Dict[str, Any]] = []
     for s in prs.slides:
-        slides.append(_extract_slide(s))
+        slides.append(_extract_slide(s, slide_width_px))
 
-    # assemble a high-recall text corpus
-    all_text_parts: List[str] = []
+    # assemble high-recall text
+    parts: List[str] = []
     for i, sl in enumerate(slides, 1):
         if sl.get("title"):
-            all_text_parts.append(f"[Slide {i}] {sl['title']}")
+            parts.append(f"[Slide {i}] {sl['title']}")
         if sl.get("text"):
-            all_text_parts.append(sl["text"])
-    all_text = "\n\n".join(all_text_parts).strip()
+            parts.append(sl["text"])
+    all_text = "\n\n".join(parts).strip()
 
     hints = _gather_hints(all_text)
 
     return func.HttpResponse(
         json.dumps({
             "ok": True,
-            "slides": slides,            # rich blocks with bbox/lines
-            "slides_text": all_text,     # linearized, high-recall text
-            "raw": all_text,             # backward compat
-            "hints": hints               # emails/phones/urls/linkedin candidates
+            "slides": slides,         # blocks with bbox/column
+            "slides_text": all_text,  # linear, left/right tagged
+            "raw": all_text,
+            "hints": hints
         }),
-        status_code=200,
-        mimetype="application/json"
+        status_code=200, mimetype="application/json"
     )

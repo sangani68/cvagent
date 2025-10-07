@@ -1,109 +1,145 @@
-import os, json, logging, base64
+# renderpdf_html/__init__.py
+import json, os, io, tempfile, traceback
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
-
 import azure.functions as func
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.storage.blob import generate_blob_sas, BlobSasPermissions
 from playwright.sync_api import sync_playwright
-from azure.storage.blob import BlobServiceClient, ContentSettings, generate_blob_sas, BlobSasPermissions
 
-TEMPLATES_DIRS = [
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "templates")),
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates")),
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-]
-DEFAULT_TEMPLATE = os.getenv("CV_TEMPLATE_NAME", "cv_europass.html")
-PDF_OUT_CONTAINER = os.getenv("PDF_OUT_CONTAINER", "pdf-out")
-PRIMARY_HEX = os.getenv("PRIMARY_HEX", "#0F62FE")
+# ---- Config (keeps your conventions) ----
+ACCOUNT_URL     = os.environ.get("AZURE_STORAGE_BLOB_URL") or os.environ.get("BLOB_ACCOUNT_URL")
+CONN_STR        = os.environ.get("AzureWebJobsStorage") or os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+PDF_CONTAINER   = os.environ.get("PDF_CONTAINER", "pdf-out")
+# optional: control filename color/brand via your existing setting
+PRIMARY_RGB     = os.environ.get("PDF_PRIMARY_RGB", "0,102,204")
 
-def _env() -> Environment:
-    return Environment(
-        loader=FileSystemLoader(TEMPLATES_DIRS),
-        autoescape=select_autoescape(["html","xml"]),
-        trim_blocks=True, lstrip_blocks=True
-    )
+# SAS expiry in minutes for returned link
+SAS_MINUTES     = int(os.environ.get("SAS_MINUTES", "120"))
 
-def _theme():
-    h = PRIMARY_HEX.lstrip("#")
-    if len(h)==3: h = "".join([c*2 for c in h])
-    r,g,b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
-    return {"primary_hex": PRIMARY_HEX, "primary_rgb": f"{r},{g},{b}"}
+def _blob_client(container: str, blob_name: str):
+    bsc = BlobServiceClient.from_connection_string(CONN_STR)
+    return bsc.get_blob_client(container=container, blob=blob_name)
 
-def _render_html(cv: Dict[str, Any], template_name: Optional[str]) -> str:
-    tpl = _env().get_template(template_name or DEFAULT_TEMPLATE)
-    return tpl.render(cv=cv, theme=_theme(), now=datetime.utcnow())
+def _ensure_container(container: str):
+    try:
+        bsc = BlobServiceClient.from_connection_string(CONN_STR)
+        bsc.create_container(container)
+    except Exception:
+        pass
 
-def _html_to_pdf(html: str) -> bytes:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-sandbox"], headless=True)
-        page = browser.new_page()
-        page.set_content(html, wait_until="load")
-        pdf = page.pdf(format="A4", print_background=True,
-                       margin={"top":"12mm","bottom":"12mm","left":"10mm","right":"10mm"})
-        browser.close()
-        return pdf
-
-def _sas_url(blob_name: str, minutes: int = 1440) -> str:
-    conn = os.getenv("AzureWebJobsStorage")
-    bsc = BlobServiceClient.from_connection_string(conn)
-    cc = bsc.get_container_client(PDF_OUT_CONTAINER)
-    try: cc.create_container()
-    except Exception: pass
-
-    cs = ContentSettings(content_type="application/pdf",
-                         content_disposition=f'inline; filename="{os.path.basename(blob_name)}"')
-    cc.upload_blob(name=blob_name, data=b"", overwrite=True, content_settings=cs)  # ensure exists before overwrite
-    cc.upload_blob(name=blob_name, data=None, overwrite=True)  # noop to keep metadata if already uploaded
-
-    # upload final bytes happens outside; this just ensures container exists
-
-    # build SAS
+def _make_sas(container: str, blob_name: str, minutes: int = SAS_MINUTES) -> str:
+    # Build SAS with read perms
     from azure.storage.blob import generate_blob_sas, BlobSasPermissions
-    parts = {}
-    for seg in os.getenv("AzureWebJobsStorage","").split(";"):
-        if "=" in seg:
-            k,v = seg.split("=",1); parts[k]=v
-    account = parts.get("AccountName"); key = parts.get("AccountKey")
-    suffix = parts.get("EndpointSuffix","core.windows.net")
-    base = f"https://{account}.blob.{suffix}"
-    sas = generate_blob_sas(account_name=account, container_name=PDF_OUT_CONTAINER,
-                            blob_name=blob_name, account_key=key,
-                            permission=BlobSasPermissions(read=True),
-                            expiry=datetime.utcnow()+timedelta(minutes=minutes))
-    return f"{base}/{PDF_OUT_CONTAINER}/{blob_name}?{sas}"
+    from datetime import datetime, timezone
+    account_name = os.environ.get("STORAGE_ACCOUNT_NAME")
+    account_key  = os.environ.get("STORAGE_ACCOUNT_KEY")
+    # If you don't expose name/key as app settings, SAS is optional; the raw URL still works if container is public.
+    if not (account_name and account_key):
+        # Fall back to regular URL (no SAS)
+        base = ACCOUNT_URL or ""
+        return f"{base}/{container}/{blob_name}"
+
+    sas = generate_blob_sas(
+        account_name=account_name,
+        container_name=container,
+        blob_name=blob_name,
+        account_key=account_key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.utcnow() + timedelta(minutes=minutes),
+    )
+    base = ACCOUNT_URL or f"https://{account_name}.blob.core.windows.net"
+    return f"{base}/{container}/{blob_name}?{sas}"
+
+def _render_pdf_bytes(html: str, css: str = "") -> bytes:
+    # Write temp HTML; keep CSS inline to avoid file path shenanigans on Functions.
+    with tempfile.TemporaryDirectory() as td:
+        html_path = os.path.join(td, "cv.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            if css and css.strip():
+                f.write(f"<style>{css}</style>\n")
+            # Optionally expose theme color to CSS if you like
+            f.write(f'<!-- primary={PRIMARY_RGB} -->\n')
+            f.write(html)
+
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--single-process",
+                        "--no-zygote",
+                    ],
+                )
+            except Exception as e:
+                raise RuntimeError(f"Playwright launch failed: {e}")
+
+            page = browser.new_page()
+            page.goto(f"file://{html_path}")
+            # Wait for fonts/images/custom elements to settle
+            page.wait_for_load_state("networkidle")
+
+            pdf_bytes = page.pdf(
+                format="A4",
+                print_background=True,
+                margin={"top": "10mm", "bottom": "12mm", "left": "10mm", "right": "10mm"},
+            )
+            browser.close()
+            return pdf_bytes
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    try: body = req.get_json()
-    except ValueError: return func.HttpResponse("Invalid JSON", status_code=400)
+    try:
+        payload = req.get_json()
+    except Exception:
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid JSON body"}), mimetype="application/json", status_code=400
+        )
 
-    cv = body.get("cv")
-    if not isinstance(cv, dict): return func.HttpResponse("Missing cv", status_code=400)
-    file_name = (body.get("file_name") or "cv.pdf").strip() or "cv.pdf"
-    template = body.get("template") or DEFAULT_TEMPLATE
-    want = (body.get("return") or "url").lower()
+    html       = payload.get("html")
+    css        = payload.get("css", "")
+    out_name   = payload.get("out_name")  # prefer UI to send the source-pptx-matching name
+    container  = payload.get("container") or PDF_CONTAINER
+
+    if not html:
+        return func.HttpResponse(
+            json.dumps({"error": "Missing 'html' in request body"}), mimetype="application/json", status_code=400
+        )
+
+    # Default filename if UI didn't send one
+    if not out_name:
+        out_name = f"cv-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.pdf"
+    if not out_name.lower().endswith(".pdf"):
+        out_name += ".pdf"
 
     try:
-        html = _render_html(cv, template)
-        pdf_bytes = _html_to_pdf(html)
+        pdf_bytes = _render_pdf_bytes(html, css)
     except Exception as e:
-        logging.exception("render failed")
-        return func.HttpResponse(f"PDF render error: {e}", status_code=500)
+        return func.HttpResponse(
+            json.dumps({"error": f"HTML->PDF failed: {str(e)}", "trace": traceback.format_exc()}),
+            mimetype="application/json",
+            status_code=500,
+        )
 
-    conn = os.getenv("AzureWebJobsStorage")
-    bsc = BlobServiceClient.from_connection_string(conn)
-    cc = bsc.get_container_client(PDF_OUT_CONTAINER)
-    try: cc.create_container()
-    except Exception: pass
-    cs = ContentSettings(content_type="application/pdf",
-                         content_disposition=f'inline; filename="{file_name}"')
-    cc.upload_blob(file_name, pdf_bytes, overwrite=True, content_settings=cs)
-
-    url = _sas_url(file_name, minutes=int(os.getenv("PDF_SAS_TTL_MIN", "1440")))
-
-    if want == "base64":
-        b64 = base64.b64encode(pdf_bytes).decode("ascii")
-        return func.HttpResponse(json.dumps({"ok": True, "pdf_blob": file_name, "content_base64": b64}),
-                                 mimetype="application/json")
-
-    return func.HttpResponse(json.dumps({"ok": True, "pdf_blob": file_name, "url": url}),
-                             mimetype="application/json")
+    try:
+        _ensure_container(container)
+        bc = _blob_client(container, out_name)
+        bc.upload_blob(
+            io.BytesIO(pdf_bytes),
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/pdf"),
+        )
+        sas_url = _make_sas(container, out_name)
+        return func.HttpResponse(
+            json.dumps({"ok": True, "pdf_url": sas_url, "blob": {"container": container, "name": out_name}}),
+            mimetype="application/json",
+            status_code=200,
+        )
+    except Exception as e:
+        return func.HttpResponse(
+            json.dumps({"error": f"Upload failed: {str(e)}", "trace": traceback.format_exc()}),
+            mimetype="application/json",
+            status_code=500,
+        )

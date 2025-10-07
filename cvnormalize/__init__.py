@@ -14,27 +14,20 @@ def _get(name: str, *aliases: str, default: Optional[str] = None) -> Optional[st
             return v
     return default
 
-# Support both AOAI_* and AZURE_OPENAI_* naming
+# Support your AOAI_* names (and AZURE_OPENAI_* aliases)
 AOAI_ENDPOINT     = _get("AOAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT")
 AOAI_KEY          = _get("AOAI_KEY", "AZURE_OPENAI_API_KEY")
 AOAI_DEPLOYMENT   = _get("AOAI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT", default="gpt-4.1")
 AOAI_API_VERSION  = _get("AOAI_API_VERSION", "AZURE_OPENAI_API_VERSION", default="2024-10-21")
 
-if not (AOAI_ENDPOINT and AOAI_KEY):
-    logging.warning("Azure OpenAI endpoint/key not set. Set AOAI_ENDPOINT and AOAI_KEY (or AZURE_OPENAI_*).")
-
 _client: Optional[AzureOpenAI] = None
 def client() -> AzureOpenAI:
     global _client
     if _client is None:
-        _client = AzureOpenAI(
-            azure_endpoint=AOAI_ENDPOINT,
-            api_key=AOAI_KEY,
-            api_version=AOAI_API_VERSION,
-        )
+        _client = AzureOpenAI(azure_endpoint=AOAI_ENDPOINT, api_key=AOAI_KEY, api_version=AOAI_API_VERSION)
     return _client
 
-# ---------- JSON Schema (optional fields allowed) ----------
+# ---------- CV schema (optional fields allowed) ----------
 CV_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -117,37 +110,44 @@ CV_SCHEMA: Dict[str, Any] = {
                 },
                 "required": ["name"]
             }
+        },
+        "provenance": {
+            "type": "object",
+            "additionalProperties": True
         }
     },
     "required": ["personal_info"]
 }
 
 SYSTEM_PROMPT = """You are an expert CV normalizer.
-Transform noisy text (from a PPTX CV) into a clean JSON that fits the provided JSON Schema.
-- Proofread grammar/spelling without changing meaning.
-- Normalize dates (e.g., "Jan 2023", "2019–2022", or "Present").
-- Merge duplicates; keep concise bullet points (max 7 per job).
-- Group skills into logical groups; deduplicate items.
-- Do not invent facts. If a field is unknown, omit it.
-Return ONLY JSON that validates against the schema.
+You receive noisy content extracted from a PPTX (text + blocks + hints).
+Your goal: return a clean JSON CV that matches the schema. Rules:
+- Use ALL relevant content from the provided text and blocks. Do not drop information.
+- Proofread grammar & spelling. Keep meaning; do not fabricate facts.
+- Normalize dates into clean strings (e.g., "Jan 2023", "2019–2022", "Present").
+- Merge duplicates; keep concise bullets (≤ 8 per role). Preserve metrics and impact.
+- Group skills into logical categories; deduplicate.
+- If field unknown, omit it rather than invent.
+Return ONLY JSON (no commentary).
 """
 
-def _normalize_with_llm(raw_text: str) -> Dict[str, Any]:
-    # NOTE: no "strict": True here — optional fields remain optional.
+def _normalize_with_llm(raw_text: str, blocks: Optional[Any], hints: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    # Build a single 'user' message with both the linear text and a compact view of blocks + hints.
+    # This improves recall (tables & side columns are included).
+    payload = {
+        "raw_text": raw_text,
+        "blocks": blocks or [],
+        "hints": hints or {}
+    }
+
     resp = client().chat.completions.create(
         model=AOAI_DEPLOYMENT,
-        temperature=0.2,
-        max_tokens=3500,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "CVSchema",
-                "schema": CV_SCHEMA
-            }
-        },
+        temperature=0.1,
+        max_tokens=4000,
+        response_format={"type": "json_schema", "json_schema": {"name": "CVSchema", "schema": CV_SCHEMA}},
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": raw_text}
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
         ]
     )
     content = resp.choices[0].message.content
@@ -162,17 +162,19 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError:
         return func.HttpResponse("Invalid JSON", status_code=400)
 
-    text = body.get("text") or body.get("slides_text") or body.get("raw")
+    text  = body.get("text") or body.get("slides_text") or body.get("raw")
+    blocks = body.get("blocks")
+    hints  = body.get("hints")
+
     if not text or not isinstance(text, str):
         return func.HttpResponse("Missing 'text' (or 'slides_text'/'raw')", status_code=400)
 
     try:
-        cv = _normalize_with_llm(text)
+        cv = _normalize_with_llm(text, blocks, hints)
+        # add simple provenance
+        cv["provenance"] = {"normalized_at": __import__("datetime").datetime.utcnow().isoformat() + "Z", "model": AOAI_DEPLOYMENT}
     except Exception as e:
         logging.exception("AOAI normalization failed")
-        return func.HttpResponse(
-            json.dumps({"error": f"normalize failed: {e}"}),
-            status_code=502, mimetype="application/json"
-        )
+        return func.HttpResponse(json.dumps({"error": f"normalize failed: {e}"}), status_code=502, mimetype="application/json")
 
     return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")

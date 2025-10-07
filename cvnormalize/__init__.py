@@ -34,7 +34,7 @@ def client() -> AzureOpenAI:
         )
     return _client
 
-# ---------- schema (same as before) ----------
+# ---------- JSON Schema (optional fields allowed) ----------
 CV_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -123,9 +123,9 @@ CV_SCHEMA: Dict[str, Any] = {
 }
 
 SYSTEM_PROMPT = """You are an expert CV normalizer.
-Transform noisy text (from a PPTX CV) into a clean, strict JSON that fits the provided JSON Schema.
-- Proofread grammar and spelling without changing meaning.
-- Normalize dates (e.g., 'Jan 2023', '2019–2022', or 'Present').
+Transform noisy text (from a PPTX CV) into a clean JSON that fits the provided JSON Schema.
+- Proofread grammar/spelling without changing meaning.
+- Normalize dates (e.g., "Jan 2023", "2019–2022", or "Present").
 - Merge duplicates; keep concise bullet points (max 7 per job).
 - Group skills into logical groups; deduplicate items.
 - Do not invent facts. If a field is unknown, omit it.
@@ -133,16 +133,16 @@ Return ONLY JSON that validates against the schema.
 """
 
 def _normalize_with_llm(raw_text: str) -> Dict[str, Any]:
+    # NOTE: no "strict": True here — optional fields remain optional.
     resp = client().chat.completions.create(
-        model=AOAI_DEPLOYMENT,           # your AOAI deployment name
+        model=AOAI_DEPLOYMENT,
         temperature=0.2,
         max_tokens=3500,
         response_format={
             "type": "json_schema",
             "json_schema": {
                 "name": "CVSchema",
-                "schema": CV_SCHEMA,
-                "strict": True
+                "schema": CV_SCHEMA
             }
         },
         messages=[

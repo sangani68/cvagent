@@ -1,115 +1,182 @@
-import os, json, uuid, datetime, traceback
+import os
+import json
+import logging
+from typing import Any, Dict, Optional
+
 import azure.functions as func
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError, URLError
 
-# ---- Config (you said you use gpt-4.1 + 2024-12-01-preview) ----
-AOAI_ENDPOINT    = os.environ["AOAI_ENDPOINT"]
-AOAI_KEY         = os.environ["AOAI_KEY"]
-AOAI_DEPLOYMENT  = os.environ.get("AOAI_DEPLOYMENT", "gpt-4.1")
-AOAI_API_VERSION = os.environ.get("AOAI_API_VERSION", "2024-12-01-preview")
+# Azure OpenAI SDK (same 'openai' package, but Azure client)
+from openai import AzureOpenAI
 
-JSON_BASE        = os.environ["STORAGE_JSON_BASE"]  # SAS to json-parsed (Create+Write)
+# -----------------------------
+# Env / config
+# -----------------------------
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")  # e.g. https://<your-ai>.openai.azure.com/
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")  # works with structured outputs on Chat Completions
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")       # <-- your deployment name
 
-SYSTEM = (
-  "You are a meticulous CV extractor/normalizer. Return ONLY valid JSON. "
-  "Infer sections dynamically from headings and context — do NOT drop information. "
-  "Schema (keys):\n"
-  "candidate{full_name,email,phone,location,links{linkedin,github,portfolio}},\n"
-  "summary,\n"
-  "experience[{title,company,employment_type,start_date,end_date,location,bullets[],tech[]}],\n"
-  "education[{degree,field,institution,start_year,end_year}],\n"
-  "certifications[{name,issuer,date}],\n"
-  "projects[{name,description,tech[]}],\n"
-  "skills (object, optional),\n"
-  "skills_groups (array of {name,items[]}) ← use this for dynamic categories (e.g., 'Cloud Platforms', 'Analytics & Visualization', 'Integration Tools', etc.),\n"
-  "languages (array of strings),\n"
-  "sections_extra (array of {name, items[] or paragraphs[]}) for any other named sections (e.g., Publications, Trainings),\n"
-  "provenance{model,normalized_at}.\n"
-  "Rules:\n"
-  "- Keep facts verbatim; no hallucinations.\n"
-  "- Preserve EVERY bullet. If the source uses tables/sidebars, transform them into appropriate lists.\n"
-  "- Dates: YYYY-MM if available; otherwise YYYY or null.\n"
-  "- Standardize tech names but do not invent.\n"
-  "- If both a legacy 'skills' object and 'skills_groups' make sense, you may include both; 'skills_groups' takes priority for rendering.\n"
-)
+if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY):
+    logging.warning("Azure OpenAI endpoint/key not set; cvnormalize will fail.")
 
-def http_get(url: str) -> bytes:
-    with urlopen(url) as r:
-        return r.read()
+# Single shared client (Functions model)
+_client: Optional[AzureOpenAI] = None
+def client() -> AzureOpenAI:
+    global _client
+    if _client is None:
+        _client = AzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION,
+        )
+    return _client
 
-def aoai_normalize(raw_text: str, blocks: list|None, slides: list|None, proofread: bool=False) -> dict:
-    user_parts = [
-        "Normalize this CV using BOTH raw text and structured blocks so NOTHING is dropped.",
-        "Return strict JSON with the schema described by the system message.",
-        f"Proofread minor grammar/punctuation? {'yes' if proofread else 'no'} (keep facts).",
-        "RAW_TEXT:\n"+raw_text[:180000]
-    ]
-    if blocks:
-        user_parts.append("BLOCKS(JSON):\n"+json.dumps(blocks)[:120000])
-    if slides:
-        user_parts.append("SLIDES(JSON):\n"+json.dumps(slides)[:80000])
+# -----------------------------
+# CV JSON Schema for structured outputs
+# -----------------------------
+CV_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "personal_info": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "full_name": {"type": "string"},
+                "headline": {"type": "string"},
+                "address": {"type": "string"},
+                "city": {"type": "string"},
+                "country": {"type": "string"},
+                "email": {"type": "string"},
+                "phone": {"type": "string"},
+                "website": {"type": "string"},
+                "linkedin": {"type": "string"},
+                "nationality": {"type": "string"},
+                "date_of_birth": {"type": "string"},
+                "gender": {"type": "string"},
+                "summary": {"type": "string"}
+            },
+            "required": ["full_name"]
+        },
+        "summary": {"type": "string"},
+        "skills_groups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "group": {"type": "string"},
+                    "items": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["group", "items"]
+            }
+        },
+        "work_experience": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string"},
+                    "company": {"type": "string"},
+                    "location": {"type": "string"},
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "description": {"type": "string"},
+                    "bullets": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["title", "company"]
+            }
+        },
+        "education": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "degree": {"type": "string"},
+                    "title": {"type": "string"},
+                    "institution": {"type": "string"},
+                    "location": {"type": "string"},
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "details": {"type": "string"}
+                },
+                "required": ["institution"]
+            }
+        },
+        "languages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string"},
+                    "level": {"type": "string"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    "required": ["personal_info"]
+}
 
-    payload = {
-        "messages": [
-            {"role":"system","content": SYSTEM},
-            {"role":"user","content": "\n\n".join(user_parts)}
-        ],
-        "temperature": 0.1,
-        "response_format": {"type":"json_object"}
-    }
-    url = f"{AOAI_ENDPOINT}/openai/deployments/{AOAI_DEPLOYMENT}/chat/completions?api-version={AOAI_API_VERSION}"
-    req = Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
-                  headers={"Content-Type":"application/json","api-key":AOAI_KEY})
-    with urlopen(req) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        content = data["choices"][0]["message"]["content"]
-        obj = json.loads(content)
-        obj.setdefault("provenance", {})
-        obj["provenance"]["model"] = AOAI_DEPLOYMENT
-        obj["provenance"]["normalized_at"] = datetime.datetime.utcnow().isoformat()+"Z"
-        return obj
+SYSTEM_PROMPT = """You are an expert CV normalizer.
+You will transform noisy text (from a PPTX CV) into a clean, strict JSON that fits the provided JSON Schema.
+Do the following:
+- Proofread grammar & spelling without changing meaning.
+- Normalize dates to consistent readable strings (e.g., "Jan 2023", "2019–2022", or "Present").
+- Merge duplicates; keep final, concise bullet points (max 7 per job).
+- Group skills into logical groups; deduplicate items.
+- Do not invent facts. If a field is unknown, omit it.
+- Keep output concise and professional.
+Respond ONLY with JSON per the schema.
+"""
 
-def put_json(container_sas: str, blob_name: str, obj: dict) -> str:
-    if "?" in container_sas:
-        prefix, qs = container_sas.split("?", 1)
-        dest = f"{prefix.rstrip('/')}/{blob_name}?{qs}"
-    else:
-        dest = f"{container_sas.rstrip('/')}/{blob_name}"
-    req = Request(dest, data=json.dumps(obj).encode("utf-8"), method="PUT",
-                  headers={"x-ms-blob-type":"BlockBlob","Content-Type":"application/json"})
-    with urlopen(req) as r:
-        _ = r.read()
-        return dest
+def _normalize_with_llm(raw_text: str) -> Dict[str, Any]:
+    # Structured outputs (json_schema) make the model adhere to our schema strictly.
+    # Ref: Azure OpenAI structured outputs. 
+    resp = client().chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        temperature=0.2,
+        max_tokens=3500,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "CVSchema",
+                "schema": CV_SCHEMA,
+                "strict": True
+            }
+        },
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": raw_text}
+        ]
+    )
+    content = resp.choices[0].message.content
+    return json.loads(content)
 
-async def main(req: func.HttpRequest) -> func.HttpResponse:
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    if req.method != "POST":
+        return func.HttpResponse("POST only", status_code=405)
+
     try:
         body = req.get_json()
-        name_hint = body.get("name_hint","cv")
-        proofread = bool(body.get("proofread", False))
+    except ValueError:
+        return func.HttpResponse("Invalid JSON", status_code=400)
 
-        if "raw_json_url" in body:
-            raw = json.loads(http_get(body["raw_json_url"]).decode("utf-8"))
-            raw_text = raw.get("raw_text","")
-            blocks = raw.get("blocks")
-            slides = raw.get("slides")
-        elif "text" in body:
-            raw_text = body["text"]
-            blocks = None
-            slides = None
-        else:
-            return func.HttpResponse(json.dumps({"error":"Provide 'raw_json_url' or 'text'."}), status_code=400)
+    # Accept either 'text' or 'slides_text' or 'raw'
+    text = body.get("text") or body.get("slides_text") or body.get("raw")
+    if not text or not isinstance(text, str):
+        return func.HttpResponse("Missing 'text' (or 'slides_text'/'raw')", status_code=400)
 
-        cv = aoai_normalize(raw_text, blocks, slides, proofread=proofread)
-
-        key = f"{name_hint}-{uuid.uuid4()}.json"
-        json_url = put_json(JSON_BASE, key, cv)
-        return func.HttpResponse(json.dumps({"cv":cv,"json_url":json_url}), mimetype="application/json")
-
-    except (HTTPError, URLError) as e:
-        detail=""
-        try: detail = e.read().decode("utf-8","ignore")
-        except Exception: pass
-        return func.HttpResponse(json.dumps({"error":"AOAI/HTTP","detail":detail}), status_code=500)
+    try:
+        cv = _normalize_with_llm(text)
     except Exception as e:
-        return func.HttpResponse(json.dumps({"error":str(e),"trace":traceback.format_exc()}), status_code=500)
+        logging.exception("AOAI normalization failed")
+        return func.HttpResponse(
+            json.dumps({"error": f"normalize failed: {e}"}),
+            status_code=502, mimetype="application/json"
+        )
+
+    return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")

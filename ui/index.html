@@ -5,18 +5,21 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>CV Agent – Extract • Edit • Export</title>
   <style>
-    :root{ --primary:#0F62FE; --ink:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#fff }
+    :root{
+      --brand:#0F62FE; --ink:#0f172a; --muted:#64748b; --line:#e5e7eb; --bg:#ffffff;
+      --side:#f8fafc; --pill:#eef2ff; --pill-ink:#3730a3;
+    }
     *{box-sizing:border-box}
-    body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;color:var(--ink);background:var(--bg)}
-    .wrap{max-width:1060px;margin:28px auto 80px;padding:0 16px}
+    body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;color:var(--ink);background:var(--bg)}
+    .wrap{max-width:1140px;margin:28px auto 80px;padding:0 16px}
     h1{font-size:22px;margin:0 0 8px}
     p{margin:0 0 12px;color:var(--muted)}
     .card{border:1px solid var(--line);background:#fff;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
     .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
-    input,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font:inherit}
+    input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;background:#fff}
     textarea{min-height:90px}
-    .btn{appearance:none;border:0;background:var(--primary);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
+    .btn{appearance:none;border:0;background:var(--brand);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
     .btn.secondary{background:#1118270d;color:#111827}
     .btn:disabled{opacity:.6;cursor:not-allowed}
     .toolbar{display:flex;flex-wrap:wrap;gap:8px}
@@ -25,15 +28,50 @@
     .list{display:grid;gap:12px}
     .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
     .hr{height:1px;background:var(--line);margin:14px 0}
-    .log{background:#0b1020;color:#d1d5db;font:12px/1.45 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:240px;overflow:auto}
-    .pill{display:inline-block;padding:.2rem .5rem;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px}
-    .right{text-align:right}
+    .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:240px;overflow:auto}
+
+    /* ---------- PREVIEW FRAME ---------- */
+    #preview-frame{width:100%;height:900px;border:1px solid var(--line);border-radius:12px}
+
+    /* ---------- (Client) PDF CSS TEMPLATES ---------- */
+    /* Base reset for PDF html we generate */
+    .pdf-root{font-family:"DejaVu Sans", Arial, Helvetica, sans-serif; font-size:12px; color:#0f172a;}
+    .pdf-root h1{margin:0 0 6px}
+    .pdf-root h2{font-size:15px;margin:18px 0 8px;padding-bottom:4px;border-bottom:1px solid #e5e7eb;letter-spacing:.02em}
+    .pdf-pill{display:inline-block;padding:3px 8px;border:1px solid #e5e7eb;border-radius:999px;margin:2px 4px}
+    .pdf-muted{color:#64748b}
+    .pdf-sec{margin-top:8px}
+    .pdf-ul{margin:6px 0 0 18px}
+
+    /* ===== Template: Europass ===== */
+    .eu-root{display:grid;grid-template-columns:320px 1fr;gap:0;min-height:100vh}
+    .eu-side{background:var(--side);border-right:1px solid #e5e7eb;padding:22px}
+    .eu-main{padding:22px 26px}
+    .eu-name{font-size:26px;font-weight:800;line-height:1.15;margin:0}
+    .eu-title{font-size:13px;color:#475569;margin-top:4px}
+    .eu-block{margin-top:18px}
+    .eu-kv{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start;margin:6px 0}
+    .eu-kv .ico{width:22px;height:22px;border-radius:6px;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:12px}
+    .eu-sec{margin-top:16px}
+    .eu-sec h2{font-size:14px;font-weight:800;margin:0 0 10px;color:#0f172a;text-transform:uppercase;letter-spacing:.06em}
+    .eu-chip{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #e0e7ff;border-radius:999px;padding:3px 10px;margin:3px 4px 0 0;font-size:11px}
+    .eu-job{margin:12px 0 10px}
+    .eu-job .line1{font-weight:700}
+    .eu-job .line2{color:#64748b;font-size:12px;margin-top:2px}
+    .eu-job .desc{margin-top:6px}
+    .eu-job ul{margin:6px 0 0 18px}
+    .eu-edu{margin:12px 0 6px}
+    .eu-langlist .eu-chip{background:#f1f5f9;color:#0f172a;border-color:#e2e8f0}
+    .hr-dot{height:1px;border:0;background:linear-gradient(90deg,#e5e7eb 60%,rgba(255,255,255,0) 0) repeat-x; background-size:8px 1px; margin:14px 0}
+
+    /* Print/Page setup hints (renderer respects margins) */
+    @page { size: A4; margin: 10mm }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>CV Agent</h1>
-  <p>Upload a PPTX → extract & normalize (Azure OpenAI) → edit → export a Europass-style PDF.</p>
+  <p>Upload a PPTX → extract & normalize → edit → export a pixel-perfect PDF. (Default template: <strong>europass</strong>)</p>
 
   <!-- Settings -->
   <div class="card">
@@ -53,8 +91,11 @@
         <input id="cvagentPath" value="api/cvagent"/>
       </div>
       <div>
-        <label>Template (for server render – unused for client HTML)</label>
-        <input id="tplName" value="cv_europass.html"/>
+        <label>Template to export</label>
+        <select id="templateName">
+          <option value="europass" selected>europass</option>
+          <!-- future: add more templates here -->
+        </select>
       </div>
     </div>
     <p class="subtle" style="margin-top:8px">
@@ -83,7 +124,7 @@
     <div id="extractLog" class="log" style="margin-top:10px; display:none"></div>
   </div>
 
-  <!-- Step 2 -->
+  <!-- Step 2 (editor) -->
   <div class="card">
     <div class="title">2) Review & edit CV fields</div>
     <div class="row">
@@ -131,9 +172,17 @@
     <div class="toolbar"><button class="btn secondary" type="button" id="addLang">+ Add language</button></div>
   </div>
 
-  <!-- Step 3 -->
+  <!-- Step 3 (preview + export) -->
   <div class="card">
-    <div class="title">3) Export PDF</div>
+    <div class="title">3) Preview (selected template)</div>
+    <iframe id="preview-frame"></iframe>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn secondary" id="btnRefreshPreview" type="button">Refresh preview</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="title">4) Export PDF</div>
     <div class="toolbar">
       <button class="btn" id="btnExport">Export PDF</button>
       <div id="exportStatus" class="subtle" style="margin-left:8px"></div>
@@ -141,11 +190,11 @@
     <div class="hr"></div>
     <div class="row">
       <div>
-        <div><span class="pill">Blob link</span></div>
+        <div class="subtle">Blob link</div>
         <div id="blobLink" style="margin-top:8px"></div>
       </div>
-      <div class="right">
-        <div><span class="pill">Local download</span></div>
+      <div style="text-align:right">
+        <div class="subtle">Local download</div>
         <div id="localLink" style="margin-top:8px"></div>
       </div>
     </div>
@@ -182,10 +231,7 @@
     const path = $("cvagentPath").value.replace(/^\\/+/, "");
     return baseUrl() + path;
   }
-  function apiUrlRenderHtml(){
-    // hard path to the HTML renderer
-    return baseUrl() + "api/renderpdf_html";
-  }
+  function apiUrlRenderHtml(){ return baseUrl() + "api/renderpdf_html"; }
   function jsonHeaders(){ return { "Content-Type": "application/json" }; }
 
   // ---------- UI builders ----------
@@ -273,6 +319,7 @@
   }
 
   // ---------- form state ----------
+  let currentSourceName = null;
   let currentCV = { personal_info:{}, work_experience:[], education:[], skills_groups:[], languages:[], summary:"" };
 
   function fillForm(cv){
@@ -296,6 +343,8 @@
     $("workList").innerHTML=''; (currentCV.work_experience||[]).forEach(j=>$("workList").appendChild(jobItem(j)));
     $("eduList").innerHTML=''; (currentCV.education||[]).forEach(e=>$("eduList").appendChild(eduItem(e)));
     $("langList").innerHTML=''; (currentCV.languages||[]).forEach(l=>$("langList").appendChild(langItem(l)));
+
+    refreshPreview(); // auto-refresh preview after fill
   }
   function collectCV(){
     const cv = {
@@ -336,104 +385,172 @@
     const text = await resp.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
     if(!resp.ok) throw new Error(text);
     xlog("cvagent normalize_only →", data);
+    // accept common keys
     return (data.cv || data.normalized || data.result || data);
   }
 
-  // ---------- client-side HTML generator for renderpdf_html ----------
-  function htmlEscape(s){ return String(s||'').replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+  // ---------- Template engine (client) ----------
+  function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 
-  function buildCss(){
-    return `
-      @page { size: A4; margin: 10mm }
-      body { font-family: "DejaVu Sans", Arial, Helvetica, sans-serif; font-size: 12px; color: #111827; }
-      h1 { font-size: 22px; margin: 0 0 6px; }
-      h2 { font-size: 16px; border-bottom: 1px solid #e5e7eb; padding-bottom: 3px; margin: 14px 0 6px; }
-      .muted { color: #6b7280; }
-      .sec { margin-top: 8px; }
-      .pill { display:inline-block; padding:3px 8px; border:1px solid #e5e7eb; border-radius:999px; margin:2px 4px; }
-      ul { margin:6px 0 0 18px; }
-    `;
-  }
-
-  function buildHtmlFromCv(cv){
-    const pi = cv.personal_info || {};
+  function tpl_europass(cv){
+    const pi=cv.personal_info||{};
+    const full = esc(pi.full_name||"");
+    const title = esc(pi.headline||"");
+    const addrLine = [pi.address, pi.city, pi.country].filter(Boolean).join(", ");
     const contacts = [
-      pi.email && {value:pi.email},
-      pi.phone && {value:pi.phone},
-      pi.website && {value:pi.website},
-      pi.linkedin && {value:pi.linkedin},
-      pi.city && {value:[pi.address, pi.city, pi.country].filter(Boolean).join(', ')},
+      pi.email && {ico:"@", txt:pi.email},
+      pi.phone && {ico:"☎", txt:pi.phone},
+      pi.linkedin && {ico:"in", txt:pi.linkedin},
+      pi.website && {ico:"🌐", txt:pi.website},
+      addrLine && {ico:"📍", txt:addrLine},
+      pi.date_of_birth && {ico:"🎂", txt:pi.date_of_birth},
+      pi.gender && {ico:"⚧", txt:pi.gender},
+      pi.nationality && {ico:"🌎", txt:pi.nationality},
     ].filter(Boolean);
 
-    const skills = (cv.skills_groups || []).flatMap(g => (g.items||[]));
-
-    const expHtml = (cv.work_experience||[]).map(e=>{
-      const period = [e.start_date, e.end_date || "Present"].filter(Boolean).join(" – ");
-      const bullets = (e.bullets||[]).map(b=>`<li>${htmlEscape(b)}</li>`).join("");
-      return `
-        <div class="sec">
-          <strong>${htmlEscape(e.title||"")}</strong> — ${htmlEscape(e.company||"")}
-          <div class="muted">${htmlEscape(period)}</div>
-          ${e.location ? `<div class="muted">${htmlEscape(e.location)}</div>` : ""}
-          ${e.description ? `<div>${htmlEscape(e.description)}</div>` : ""}
-          ${bullets ? `<ul>${bullets}</ul>` : ""}
-        </div>`;
-    }).join("");
-
-    const eduHtml = (cv.education||[]).map(ed=>{
-      const period = [ed.start_date, ed.end_date].filter(Boolean).join(" – ");
-      return `
-        <div class="sec">
-          <strong>${htmlEscape(ed.degree||ed.title||"")}</strong> — ${htmlEscape(ed.institution||"")}
-          ${period ? `<div class="muted">${htmlEscape(period)}</div>` : ""}
-          ${ed.location ? `<div class="muted">${htmlEscape(ed.location)}</div>` : ""}
-          ${ed.details ? `<div>${htmlEscape(ed.details)}</div>` : ""}
-        </div>`;
-    }).join("");
-
-    const langHtml = (cv.languages||[]).map(l=>{
-      const label = [l.name||l.language||l.lang, l.level].filter(Boolean).join(" — ");
-      return `<span class="pill">${htmlEscape(label)}</span>`;
-    }).join("");
-
-    const contactsHtml = contacts.map(c=>`<span class="pill">${htmlEscape(c.value)}</span>`).join("");
-    const skillsHtml = skills.map(s=>`<span class="pill">${htmlEscape(s)}</span>`).join("");
-
     const summary = cv.summary || pi.summary || "";
+
+    const skillsChips = (cv.skills_groups||[])
+      .flatMap(g=>g.items||[])
+      .map(s=>`<span class="eu-chip">${esc(s)}</span>`).join("");
+
+    const exp = (cv.work_experience||[]).map(e=>{
+      const l1 = `${esc(e.title||"")} — ${esc(e.company||"")}`;
+      const dates = [e.start_date, e.end_date || "Present"].filter(Boolean).join(" – ");
+      const loc = e.location ? ` • ${esc(e.location)}` : "";
+      const bullets = (e.bullets||[]).map(b=>`<li>${esc(b)}</li>`).join("");
+      return `
+        <div class="eu-job">
+          <div class="line1">${l1}</div>
+          <div class="line2">${esc(dates)}${loc}</div>
+          ${e.description?`<div class="desc">${esc(e.description)}</div>`:""}
+          ${bullets?`<ul class="pdf-ul">${bullets}</ul>`:""}
+        </div>`;
+    }).join("");
+
+    const edu = (cv.education||[]).map(ed=>{
+      const degree = esc(ed.degree||ed.title||"");
+      const inst = esc(ed.institution||"");
+      const dates = [ed.start_date, ed.end_date].filter(Boolean).join(" – ");
+      const loc = ed.location ? ` • ${esc(ed.location)}` : "";
+      const details = ed.details ? `<div class="desc">${esc(ed.details)}</div>`:"";
+      return `
+        <div class="eu-edu">
+          <div class="line1"><strong>${degree}</strong> — ${inst}</div>
+          <div class="line2">${esc(dates)}${loc}</div>
+          ${details}
+        </div>`;
+    }).join("");
+
+    const langs = (cv.languages||[]).map(l=>{
+      const label = [l.name||l.language||l.lang, l.level].filter(Boolean).join(" — ");
+      return `<span class="eu-chip">${esc(label)}</span>`;
+    }).join("");
 
     return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
-<title>${htmlEscape(pi.full_name || "Curriculum Vitae")}</title>
-<style>${buildCss()}</style>
+<title>${full || "Curriculum Vitae"}</title>
+<style>
+  @page { size: A4; margin: 10mm }
+  body{margin:0}
+  .pdf-root{font-family:"DejaVu Sans", Arial, Helvetica, sans-serif; font-size:12px; color:#0f172a;}
+  .eu-root{display:grid;grid-template-columns:320px 1fr;gap:0;min-height:100vh}
+  .eu-side{background:#f8fafc;border-right:1px solid #e5e7eb;padding:22px}
+  .eu-main{padding:22px 26px}
+  .eu-name{font-size:26px;font-weight:800;line-height:1.15;margin:0}
+  .eu-title{font-size:13px;color:#475569;margin-top:4px}
+  .eu-block{margin-top:18px}
+  .eu-kv{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start;margin:6px 0}
+  .eu-kv .ico{width:22px;height:22px;border-radius:6px;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:12px}
+  .eu-sec{margin-top:16px}
+  .eu-sec h2{font-size:14px;font-weight:800;margin:0 0 10px;color:#0f172a;text-transform:uppercase;letter-spacing:.06em}
+  .eu-chip{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #e0e7ff;border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}
+  .eu-job{margin:12px 0 10px}
+  .eu-job .line1{font-weight:700}
+  .eu-job .line2{color:#64748b;font-size:12px;margin-top:2px}
+  .eu-job .desc{margin-top:6px}
+  .eu-job ul{margin:6px 0 0 18px}
+  .eu-edu{margin:12px 0 6px}
+  .eu-langlist .eu-chip{background:#f1f5f9;color:#0f172a;border-color:#e2e8f0}
+  .hr-dot{height:1px;border:0;background:linear-gradient(90deg,#e5e7eb 60%,rgba(255,255,255,0) 0) repeat-x; background-size:8px 1px; margin:14px 0}
+</style>
 </head>
-<body>
-  <h1>${htmlEscape(pi.full_name || "")}</h1>
-  <div class="muted">${htmlEscape(pi.headline || "")}</div>
+<body class="pdf-root">
+  <div class="eu-root">
+    <aside class="eu-side">
+      <h1 class="eu-name">${full}</h1>
+      ${title?`<div class="eu-title">${title}</div>`:""}
+      <div class="eu-block">
+        ${(contacts.map(c=>`
+          <div class="eu-kv">
+            <div class="ico">${esc(c.ico)}</div>
+            <div>${esc(c.txt)}</div>
+          </div>`).join(""))}
+      </div>
+      ${skillsChips?`
+      <div class="eu-block">
+        <div class="eu-sec"><h2>Skills</h2></div>
+        <div>${skillsChips}</div>
+      </div>`:""}
+      ${langs?`
+      <div class="eu-block">
+        <div class="eu-sec"><h2>Languages</h2></div>
+        <div class="eu-langlist">${langs}</div>
+      </div>`:""}
+    </aside>
 
-  ${contactsHtml ? `<div class="sec">${contactsHtml}</div>` : ""}
+    <main class="eu-main">
+      ${summary?`
+        <section class="eu-sec">
+          <h2>About Me</h2>
+          <div>${esc(summary)}</div>
+        </section>
+        <div class="hr-dot"></div>`:""}
 
-  ${summary ? `<h2>Profile</h2><div>${htmlEscape(summary)}</div>` : ""}
+      ${cv.work_experience?.length?`
+        <section class="eu-sec">
+          <h2>Work Experience</h2>
+          ${exp}
+        </section>`:""}
 
-  ${expHtml ? `<h2>Experience</h2>${expHtml}` : ""}
-
-  ${eduHtml ? `<h2>Education</h2>${eduHtml}` : ""}
-
-  ${skillsHtml ? `<h2>Skills</h2><div>${skillsHtml}</div>` : ""}
-
-  ${langHtml ? `<h2>Languages</h2><div>${langHtml}</div>` : ""}
+      ${cv.education?.length?`
+        <section class="eu-sec">
+          <h2>Education & Training</h2>
+          ${edu}
+        </section>`:""}
+    </main>
+  </div>
 </body>
 </html>`;
   }
 
-  async function callRenderPdfHtml({ outName, html, css="" }){
+  // Master switch for templates (future-proof)
+  function renderTemplate(name, cv){
+    switch((name||"europass").toLowerCase()){
+      case "europass": default: return tpl_europass(cv);
+    }
+  }
+
+  // Preview & Export orchestrators
+  function refreshPreview(){
+    const cv = collectCV();
+    const html = renderTemplate($("templateName").value, cv);
+    const iframe = $("preview-frame");
+    iframe.srcdoc = html;
+  }
+  async function exportPdf(){
+    const out = $("outName").value.trim() || (currentSourceName ? toPdfName(currentSourceName) : "cv.pdf");
+    const cv = collectCV();
+    const html = renderTemplate($("templateName").value, cv);
+    const css = ""; // already inlined in template HTML
     const url = withKey(apiUrlRenderHtml());
-    const payload = { out_name: outName, html, css };
+    const payload = { out_name: out, html, css };
     const resp = await fetch(url, { method:'POST', headers: jsonHeaders(), body: JSON.stringify(payload) });
     const text = await resp.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
     if(!resp.ok) throw new Error(data.error || text || "Export failed");
-    if(!data.pdf_url) throw new Error("No pdf_url returned from renderpdf_html");
+    if(!data.pdf_url) throw new Error("No pdf_url returned by renderpdf_html");
     return data.pdf_url;
   }
 
@@ -447,7 +564,7 @@
   // ---------- events ----------
   $("pptxFile").addEventListener('change', (e)=>{
     const f = e.target.files && e.target.files[0];
-    if (f) $("outName").value = toPdfName(f.name);
+    if (f){ currentSourceName = f.name; $("outName").value = toPdfName(f.name); }
   });
 
   $("btnExtract").addEventListener('click', async ()=>{
@@ -466,12 +583,15 @@
 
   $("btnLoadSample").addEventListener('click', ()=>{
     fillForm({
-      personal_info:{ full_name:'Ada Lovelace', headline:'Computing Pioneer', city:'London', country:'UK', email:'ada@example.com', linkedin:'linkedin.com/in/ada' },
-      summary:'Visionary mathematician; wrote the first algorithm intended to be carried out by a machine.',
-      skills_groups:[{group:'Tech', items:['Analysis','Algorithms','Mathematics']}],
-      work_experience:[{title:'Analyst', company:'Analytical Engine', start_date:'1842', end_date:'1852', bullets:['Translated Menabrea; extensive Notes','Conceptualized loop and subroutine']}],
-      education:[{degree:'Self-taught Mathematics', institution:'Private tutelage', start_date:'1830', end_date:'1840'}],
-      languages:[{name:'English', level:'Native'}]
+      personal_info:{ full_name:'Siddharth Gupta', headline:'Senior Lead, IT Solutions', city:'Luxembourg', country:'Luxembourg', email:'guptasiddu@gmail.com', linkedin:'linkedin.com/in/siddharth' },
+      summary:'A highly skilled IT expert specialized in designing and deploying system infrastructures...',
+      skills_groups:[{group:'Tech', items:['AWS','Docker','Kubernetes','Terraform','Linux']},{group:'Tools', items:['IBM MQ','Control-M','TIBCO']}],
+      work_experience:[
+        {title:'Senior Lead, IT Solutions', company:'Kyndryl', location:'Luxembourg', start_date:'2020-08', bullets:['CFT flows migration','MQ upgrade & migration AIX→Linux','Control-M migration','BNP Cloud project focal']},
+        {title:'MQ Consultant', company:'IBM', location:'Brno', start_date:'2014-05', end_date:'2020-08', bullets:['Alitalia integrations','TIBCO + MQ setup','Oracle DB migration']}
+      ],
+      education:[{degree:'Masters Degree in Computer Science', institution:'Pune University', location:'Pune', start_date:'2006', end_date:'2009'}],
+      languages:[{name:'English', level:'C1'}]
     });
   });
 
@@ -480,22 +600,17 @@
   $("addEdu").addEventListener('click', ()=> $("eduList").appendChild(eduItem({})));
   $("addLang").addEventListener('click', ()=> $("langList").appendChild(langItem({})));
 
-  // EXPORT → build HTML on client and post to /api/renderpdf_html
-  $("btnExport").addEventListener('click', async ()=>{
-    const out = $("outName").value.trim() || 'cv.pdf';
-    $("exportStatus").textContent = 'Rendering...';
-    $("blobLink").textContent=''; $("localLink").textContent='';
-    try{
-      const cv = collectCV();
-      const html = buildHtmlFromCv(cv);
-      const css  = ""; // already inlined by buildHtmlFromCv(); keep blank
+  $("btnRefreshPreview").addEventListener('click', refreshPreview);
 
-      const pdfUrl = await callRenderPdfHtml({ outName: out, html, css });
+  $("btnExport").addEventListener('click', async ()=>{
+    $("exportStatus").textContent = 'Rendering...';
+    $("blobLink").innerHTML=''; $("localLink").innerHTML='';
+    try{
+      const pdfUrl = await exportPdf();
       $("exportStatus").textContent = 'Done.';
       $("blobLink").innerHTML = `<a href="${pdfUrl}" target="_blank" rel="noopener">Open PDF in Blob</a>`;
-
       const a=document.createElement('a'); a.href='#'; a.className='btn secondary'; a.textContent='Download locally';
-      a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(pdfUrl, out); });
+      a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(pdfUrl, $("outName").value.trim() || 'cv.pdf'); });
       $("localLink").appendChild(a);
     }catch(err){
       $("exportStatus").textContent = 'Error';

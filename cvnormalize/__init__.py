@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import azure.functions as func
 from openai import AzureOpenAI
 
-# ---------- env helpers ----------
+# ---------------- env helpers ----------------
 def _get(name: str, *aliases: str, default: Optional[str] = None) -> Optional[str]:
     for k in (name, *aliases):
         v = os.getenv(k)
@@ -14,7 +14,6 @@ def _get(name: str, *aliases: str, default: Optional[str] = None) -> Optional[st
             return v
     return default
 
-# Support your AOAI_* names (and AZURE_OPENAI_* aliases)
 AOAI_ENDPOINT     = _get("AOAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT")
 AOAI_KEY          = _get("AOAI_KEY", "AZURE_OPENAI_API_KEY")
 AOAI_DEPLOYMENT   = _get("AOAI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT", default="gpt-4.1")
@@ -27,7 +26,7 @@ def client() -> AzureOpenAI:
         _client = AzureOpenAI(azure_endpoint=AOAI_ENDPOINT, api_key=AOAI_KEY, api_version=AOAI_API_VERSION)
     return _client
 
-# ---------- CV schema (optional fields allowed) ----------
+# --------------- CV schema -------------------
 CV_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -111,35 +110,29 @@ CV_SCHEMA: Dict[str, Any] = {
                 "required": ["name"]
             }
         },
-        "provenance": {
-            "type": "object",
-            "additionalProperties": True
-        }
+        "provenance": {"type": "object", "additionalProperties": True}
     },
     "required": ["personal_info"]
 }
 
 SYSTEM_PROMPT = """You are an expert CV normalizer.
-You receive noisy content extracted from a PPTX (text + blocks + hints).
-Your goal: return a clean JSON CV that matches the schema. Rules:
-- Use ALL relevant content from the provided text and blocks. Do not drop information.
-- Proofread grammar & spelling. Keep meaning; do not fabricate facts.
-- Normalize dates into clean strings (e.g., "Jan 2023", "2019–2022", "Present").
-- Merge duplicates; keep concise bullets (≤ 8 per role). Preserve metrics and impact.
+You receive CV content extracted from a PPTX:
+- 'raw_text': a high-recall linear text with [L]/[R] column cues and slide titles.
+- 'blocks': structured blocks (text/table) with positions and left/right columns.
+- 'hints': detected emails/phones/urls/linkedin.
+Goal: return a clean CV JSON matching the schema.
+Rules:
+- Use ALL relevant content; do not drop side-column or table data.
+- Proofread grammar and spelling, but do not change meaning.
+- Normalize dates (e.g., "Jan 2023", "2019–2022", "Present").
+- Merge duplicates; keep concise bullets (<= 8 per role) with impact/metrics.
 - Group skills into logical categories; deduplicate.
-- If field unknown, omit it rather than invent.
-Return ONLY JSON (no commentary).
+- If unknown, omit the field.
+Return ONLY JSON that validates against the schema.
 """
 
-def _normalize_with_llm(raw_text: str, blocks: Optional[Any], hints: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    # Build a single 'user' message with both the linear text and a compact view of blocks + hints.
-    # This improves recall (tables & side columns are included).
-    payload = {
-        "raw_text": raw_text,
-        "blocks": blocks or [],
-        "hints": hints or {}
-    }
-
+def _normalize_with_llm(raw_text: str, blocks: Any, hints: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {"raw_text": raw_text, "blocks": blocks or [], "hints": hints or {}}
     resp = client().chat.completions.create(
         model=AOAI_DEPLOYMENT,
         temperature=0.1,
@@ -162,7 +155,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError:
         return func.HttpResponse("Invalid JSON", status_code=400)
 
-    text  = body.get("text") or body.get("slides_text") or body.get("raw")
+    text   = body.get("text") or body.get("slides_text") or body.get("raw")
     blocks = body.get("blocks")
     hints  = body.get("hints")
 
@@ -171,8 +164,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         cv = _normalize_with_llm(text, blocks, hints)
-        # add simple provenance
-        cv["provenance"] = {"normalized_at": __import__("datetime").datetime.utcnow().isoformat() + "Z", "model": AOAI_DEPLOYMENT}
+        cv["provenance"] = {
+            "model": AOAI_DEPLOYMENT,
+            "normalized_at": __import__("datetime").datetime.utcnow().isoformat() + "Z"
+        }
     except Exception as e:
         logging.exception("AOAI normalization failed")
         return func.HttpResponse(json.dumps({"error": f"normalize failed: {e}"}), status_code=502, mimetype="application/json")

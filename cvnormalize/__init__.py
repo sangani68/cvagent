@@ -4,36 +4,37 @@ import logging
 from typing import Any, Dict, Optional
 
 import azure.functions as func
-
-# Azure OpenAI SDK (same 'openai' package, but Azure client)
 from openai import AzureOpenAI
 
-# -----------------------------
-# Env / config
-# -----------------------------
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")  # e.g. https://<your-ai>.openai.azure.com/
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")  # works with structured outputs on Chat Completions
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")       # <-- your deployment name
+# ---------- env helpers ----------
+def _get(name: str, *aliases: str, default: Optional[str] = None) -> Optional[str]:
+    for k in (name, *aliases):
+        v = os.getenv(k)
+        if v:
+            return v
+    return default
 
-if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY):
-    logging.warning("Azure OpenAI endpoint/key not set; cvnormalize will fail.")
+# Support both AOAI_* and AZURE_OPENAI_* naming
+AOAI_ENDPOINT     = _get("AOAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT")
+AOAI_KEY          = _get("AOAI_KEY", "AZURE_OPENAI_API_KEY")
+AOAI_DEPLOYMENT   = _get("AOAI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT", default="gpt-4.1")
+AOAI_API_VERSION  = _get("AOAI_API_VERSION", "AZURE_OPENAI_API_VERSION", default="2024-10-21")
 
-# Single shared client (Functions model)
+if not (AOAI_ENDPOINT and AOAI_KEY):
+    logging.warning("Azure OpenAI endpoint/key not set. Set AOAI_ENDPOINT and AOAI_KEY (or AZURE_OPENAI_*).")
+
 _client: Optional[AzureOpenAI] = None
 def client() -> AzureOpenAI:
     global _client
     if _client is None:
         _client = AzureOpenAI(
-            azure_endpoint=AZURE_OPENAI_ENDPOINT,
-            api_key=AZURE_OPENAI_API_KEY,
-            api_version=AZURE_OPENAI_API_VERSION,
+            azure_endpoint=AOAI_ENDPOINT,
+            api_key=AOAI_KEY,
+            api_version=AOAI_API_VERSION,
         )
     return _client
 
-# -----------------------------
-# CV JSON Schema for structured outputs
-# -----------------------------
+# ---------- schema (same as before) ----------
 CV_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -122,22 +123,18 @@ CV_SCHEMA: Dict[str, Any] = {
 }
 
 SYSTEM_PROMPT = """You are an expert CV normalizer.
-You will transform noisy text (from a PPTX CV) into a clean, strict JSON that fits the provided JSON Schema.
-Do the following:
-- Proofread grammar & spelling without changing meaning.
-- Normalize dates to consistent readable strings (e.g., "Jan 2023", "2019–2022", or "Present").
-- Merge duplicates; keep final, concise bullet points (max 7 per job).
+Transform noisy text (from a PPTX CV) into a clean, strict JSON that fits the provided JSON Schema.
+- Proofread grammar and spelling without changing meaning.
+- Normalize dates (e.g., 'Jan 2023', '2019–2022', or 'Present').
+- Merge duplicates; keep concise bullet points (max 7 per job).
 - Group skills into logical groups; deduplicate items.
 - Do not invent facts. If a field is unknown, omit it.
-- Keep output concise and professional.
-Respond ONLY with JSON per the schema.
+Return ONLY JSON that validates against the schema.
 """
 
 def _normalize_with_llm(raw_text: str) -> Dict[str, Any]:
-    # Structured outputs (json_schema) make the model adhere to our schema strictly.
-    # Ref: Azure OpenAI structured outputs. 
     resp = client().chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT,
+        model=AOAI_DEPLOYMENT,           # your AOAI deployment name
         temperature=0.2,
         max_tokens=3500,
         response_format={
@@ -165,7 +162,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError:
         return func.HttpResponse("Invalid JSON", status_code=400)
 
-    # Accept either 'text' or 'slides_text' or 'raw'
     text = body.get("text") or body.get("slides_text") or body.get("raw")
     if not text or not isinstance(text, str):
         return func.HttpResponse("Missing 'text' (or 'slides_text'/'raw')", status_code=400)

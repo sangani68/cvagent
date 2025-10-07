@@ -1,63 +1,151 @@
 import io
 import os
+import re
 import json
 import logging
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import azure.functions as func
 from pptx import Presentation
 
+EMU_PER_PX = 9525  # approx at 96dpi
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", re.I)
+PHONE_RE = re.compile(r"(?:\+?\d[\d ()\-]{7,}\d)")
+URL_RE   = re.compile(r"(?:https?://|www\.)\S+", re.I)
+LINKEDIN_RE = re.compile(r"(?:linkedin\.com/[A-Za-z0-9_\-/]+)", re.I)
+
+def _px(v): return int(v / EMU_PER_PX)
+
 def _download_pptx(ppt_blob_sas: str) -> bytes:
-    r = requests.get(ppt_blob_sas, timeout=120)
+    r = requests.get(ppt_blob_sas, timeout=180)
     r.raise_for_status()
     return r.content
 
-def _extract_slide(slide) -> Tuple[str, List[str]]:
-    """Return (title, bullets/lines) for a slide."""
-    title = ""
+def _text_from_textframe(tf) -> Tuple[List[str], Optional[float]]:
+    """Return lines + an approximate max font size seen (for title detection)."""
     lines: List[str] = []
-    # Title placeholder if present
-    if getattr(slide, "shapes", None):
-        for shape in slide.shapes:
-            if not hasattr(shape, "has_text_frame") or not shape.has_text_frame:
-                continue
-            text = shape.text or ""
-            if not text.strip():
-                continue
-            # crude title detection: placeholder title or first large text
+    max_pt = None
+    for p in tf.paragraphs:
+        text = "".join(run.text or "" for run in p.runs).strip()
+        if not text:
+            continue
+        indent = "  " * (p.level or 0)
+        lines.append(indent + text)
+        for r in p.runs:
             try:
-                if getattr(shape, "is_placeholder", False) and getattr(shape.placeholder_format, "type", None) == 1:
-                    title = text.strip()
-                    continue
+                if r.font and r.font.size:
+                    v = float(r.font.size.pt)
+                    max_pt = v if max_pt is None or v > max_pt else max_pt
             except Exception:
                 pass
-            # gather paragraph runs as bullet lines
-            for p in shape.text_frame.paragraphs:
-                t = "".join(run.text for run in p.runs).strip()
-                if t:
-                    lines.append(t)
-    # notes (optional)
+    return lines, max_pt
+
+def _lines_from_table(tbl) -> List[str]:
+    out: List[str] = []
+    for r in tbl.rows:
+        cells = []
+        for c in r.cells:
+            t = (c.text or "").strip()
+            if t:
+                t = re.sub(r"\s*\n\s*", " / ", t)
+            cells.append(t)
+        row_txt = " | ".join(filter(None, cells)).strip()
+        if row_txt:
+            out.append(row_txt)
+    return out
+
+def _extract_slide(slide) -> Dict[str, Any]:
+    blocks: List[Dict[str, Any]] = []
+    title_guess = None
+    title_pt = 0.0
+
+    for sh in slide.shapes:
+        left, top, width, height = _px(sh.left), _px(sh.top), _px(sh.width), _px(sh.height)
+
+        # text box / placeholder
+        if getattr(sh, "has_text_frame", False) and sh.has_text_frame:
+            lines, max_pt = _text_from_textframe(sh.text_frame)
+            if not lines:
+                continue
+            is_title = False
+            try:
+                # placeholder title
+                if getattr(sh, "is_placeholder", False) and getattr(sh.placeholder_format, "type", None) == 1:
+                    is_title = True
+            except Exception:
+                pass
+            if max_pt and max_pt > title_pt:
+                title_pt, title_guess = max_pt, "\n".join(lines[:2])[:140]
+            blocks.append({
+                "type": "text",
+                "lines": lines,
+                "bbox": [left, top, width, height],
+                "is_title": is_title
+            })
+
+        # table
+        if getattr(sh, "has_table", False) and sh.has_table:
+            lines = _lines_from_table(sh.table)
+            if lines:
+                blocks.append({
+                    "type": "table",
+                    "lines": lines,
+                    "bbox": [left, top, width, height]
+                })
+
+    # sort blocks by reading order (top->bottom, left->right)
+    blocks.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    # slide notes (often hold extra text)
+    notes_text = None
     try:
         if getattr(slide, "notes_slide", None) and slide.notes_slide and slide.notes_slide.notes_text_frame:
-            note_text = (slide.notes_slide.notes_text_frame.text or "").strip()
-            if note_text:
-                lines.append(f"(Notes) {note_text}")
+            t = (slide.notes_slide.notes_text_frame.text or "").strip()
+            if t:
+                notes_text = t
     except Exception:
         pass
-    return title, lines
 
-def _slides_to_text(slides: List[Dict[str, Any]]) -> str:
-    out: List[str] = []
-    for i, s in enumerate(slides, 1):
-        t = s.get("title")
-        if t: out.append(f"# {t}")
-        for b in s.get("bullets", []):
-            out.append(f"- {b}")
-        if s.get("notes"):
-            out.append(f"Notes: {s['notes']}")
-        out.append("")  # blank line
-    return "\n".join(out).strip()
+    # linear text view (kept for backward compat)
+    linear: List[str] = []
+    for b in blocks:
+        if b["type"] == "text":
+            linear.extend(b["lines"])
+        elif b["type"] == "table":
+            linear.extend(b["lines"])
+    if notes_text:
+        linear.append("")
+        linear.append(f"Notes: {notes_text}")
+
+    # detect a title
+    slide_title = None
+    for b in blocks:
+        if b.get("is_title"):
+            slide_title = " ".join([ln.strip() for ln in b["lines"][:1]])
+            break
+    if not slide_title and title_guess:
+        slide_title = title_guess.strip()
+
+    return {
+        "title": slide_title,
+        "blocks": blocks,
+        "notes": notes_text,
+        "text": "\n".join(linear).strip()
+    }
+
+def _gather_hints(all_text: str) -> Dict[str, List[str]]:
+    emails = EMAIL_RE.findall(all_text) or []
+    phones = PHONE_RE.findall(all_text) or []
+    urls   = URL_RE.findall(all_text) or []
+    linked = LINKEDIN_RE.findall(all_text) or []
+    return {
+        "emails": sorted(set(emails)),
+        "phones": sorted(set(p.strip() for p in phones)),
+        "urls":   sorted(set(urls)),
+        "linkedin": sorted(set(linked))
+    }
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     if req.method != "POST":
@@ -68,33 +156,40 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError:
         return func.HttpResponse("Invalid JSON", status_code=400)
 
-    ppt_sas = body.get("ppt_blob_sas")
-    if not ppt_sas:
+    sas = body.get("ppt_blob_sas")
+    if not sas:
         return func.HttpResponse("Missing 'ppt_blob_sas'", status_code=400)
 
     try:
-        blob = _download_pptx(ppt_sas)
-        prs = Presentation(io.BytesIO(blob))
+        data = _download_pptx(sas)
+        prs = Presentation(io.BytesIO(data))
     except Exception as e:
         logging.exception("Failed to open PPTX")
         return func.HttpResponse(f"Could not read PPTX: {e}", status_code=400)
 
     slides: List[Dict[str, Any]] = []
-    for slide in prs.slides:
-        title, bullets = _extract_slide(slide)
-        slides.append({
-            "title": title,
-            "bullets": bullets
-        })
+    for s in prs.slides:
+        slides.append(_extract_slide(s))
 
-    slides_text = _slides_to_text(slides)
-    # You can also return 'raw' duplicating slides_text for downstream compatibility
+    # assemble a high-recall text corpus
+    all_text_parts: List[str] = []
+    for i, sl in enumerate(slides, 1):
+        if sl.get("title"):
+            all_text_parts.append(f"[Slide {i}] {sl['title']}")
+        if sl.get("text"):
+            all_text_parts.append(sl["text"])
+    all_text = "\n\n".join(all_text_parts).strip()
+
+    hints = _gather_hints(all_text)
+
     return func.HttpResponse(
         json.dumps({
             "ok": True,
-            "slides": slides,
-            "slides_text": slides_text,
-            "raw": slides_text
+            "slides": slides,            # rich blocks with bbox/lines
+            "slides_text": all_text,     # linearized, high-recall text
+            "raw": all_text,             # backward compat
+            "hints": hints               # emails/phones/urls/linkedin candidates
         }),
-        status_code=200, mimetype="application/json"
+        status_code=200,
+        mimetype="application/json"
     )

@@ -43,7 +43,7 @@
         <input id="baseUrl" value="/" />
       </div>
       <div>
-        <label>Host/Function Key (for cvagent)</label>
+        <label>Host/Function Key (optional)</label>
         <input id="funcKey" placeholder="paste host key or function key"/>
       </div>
     </div>
@@ -53,12 +53,12 @@
         <input id="cvagentPath" value="api/cvagent"/>
       </div>
       <div>
-        <label>Template file name</label>
+        <label>Template (for server render – unused for client HTML)</label>
         <input id="tplName" value="cv_europass.html"/>
       </div>
     </div>
     <p class="subtle" style="margin-top:8px">
-      If this page is served from the same Function App, base URL can be “/”. Otherwise set the full
+      If this page is served from the same Function App, base URL can be “/”. Otherwise use
       <code>https://&lt;app&gt;.azurewebsites.net/</code> and enable CORS.
     </p>
   </div>
@@ -163,7 +163,7 @@
   const logEl = $("log");
   const xlog = (...args) => {
     const s = args.map(a => typeof a === 'string' ? a : JSON.stringify(a,null,2)).join(' ');
-    logEl.textContent += s + "\n"; logEl.scrollTop = logEl.scrollHeight;
+    logEl.textContent += s + "\\n"; logEl.scrollTop = logEl.scrollHeight;
   };
 
   const EXT_RE = /\.(pptx|pptm|ppt|ppsx|potx|potm|odp)$/i;
@@ -178,9 +178,13 @@
     if (!key) return url;
     return url + (url.includes("?") ? "&" : "?") + "code=" + encodeURIComponent(key);
   }
-  function apiUrl(){
-    const path = $("cvagentPath").value.replace(/^\/+/, "");
+  function apiUrlCvagent(){
+    const path = $("cvagentPath").value.replace(/^\\/+/, "");
     return baseUrl() + path;
+  }
+  function apiUrlRenderHtml(){
+    // hard path to the HTML renderer
+    return baseUrl() + "api/renderpdf_html";
   }
   function jsonHeaders(){ return { "Content-Type": "application/json" }; }
 
@@ -215,7 +219,7 @@
     const sd=el('input',{value:job.start_date||'', placeholder:'Start'});
     const ed=el('input',{value:job.end_date||'', placeholder:'End or Present'});
     const desc=el('textarea',{placeholder:'Description'}); desc.value=job.description||'';
-    const bullets=el('textarea',{placeholder:'Bullets (one per line)'}); bullets.value=(job.bullets||[]).join('\n');
+    const bullets=el('textarea',{placeholder:'Bullets (one per line)'}); bullets.value=(job.bullets||[]).join('\\n');
     wrap.append(
       el('label',{},'Title'),title,
       el('label',{},'Company'),company,
@@ -230,7 +234,7 @@
     wrap._get = () => ({
       title:title.value.trim(), company:company.value.trim(), location:location.value.trim(),
       start_date:sd.value.trim(), end_date:ed.value.trim(), description:desc.value.trim(),
-      bullets: bullets.value.split('\n').map(s=>s.trim()).filter(Boolean)
+      bullets: bullets.value.split('\\n').map(s=>s.trim()).filter(Boolean)
     });
     return wrap;
   }
@@ -320,15 +324,14 @@
     return cv;
   }
 
-  // ---------- network ----------
+  // ---------- normalize (cvagent) ----------
   async function fileToBase64(file){
     return await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(file); });
   }
-
   async function callCvAgentNormalizeOnly(file){
     const b64 = await fileToBase64(file);
     const payload = { pptx_base64:b64, pptx_name:file.name, mode:"normalize_only" };
-    const url = withKey(apiUrl());
+    const url = withKey(apiUrlCvagent());
     const resp = await fetch(url, { method:'POST', headers: jsonHeaders(), body: JSON.stringify(payload) });
     const text = await resp.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
     if(!resp.ok) throw new Error(text);
@@ -336,14 +339,102 @@
     return (data.cv || data.normalized || data.result || data);
   }
 
-  async function callCvAgentRender(cv, outName, template){
-    const payload = { cv, file_name:(outName||'cv.pdf'), template:(template||'cv_europass.html'), return:"url" };
-    const url = withKey(apiUrl());
+  // ---------- client-side HTML generator for renderpdf_html ----------
+  function htmlEscape(s){ return String(s||'').replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+
+  function buildCss(){
+    return `
+      @page { size: A4; margin: 10mm }
+      body { font-family: "DejaVu Sans", Arial, Helvetica, sans-serif; font-size: 12px; color: #111827; }
+      h1 { font-size: 22px; margin: 0 0 6px; }
+      h2 { font-size: 16px; border-bottom: 1px solid #e5e7eb; padding-bottom: 3px; margin: 14px 0 6px; }
+      .muted { color: #6b7280; }
+      .sec { margin-top: 8px; }
+      .pill { display:inline-block; padding:3px 8px; border:1px solid #e5e7eb; border-radius:999px; margin:2px 4px; }
+      ul { margin:6px 0 0 18px; }
+    `;
+  }
+
+  function buildHtmlFromCv(cv){
+    const pi = cv.personal_info || {};
+    const contacts = [
+      pi.email && {value:pi.email},
+      pi.phone && {value:pi.phone},
+      pi.website && {value:pi.website},
+      pi.linkedin && {value:pi.linkedin},
+      pi.city && {value:[pi.address, pi.city, pi.country].filter(Boolean).join(', ')},
+    ].filter(Boolean);
+
+    const skills = (cv.skills_groups || []).flatMap(g => (g.items||[]));
+
+    const expHtml = (cv.work_experience||[]).map(e=>{
+      const period = [e.start_date, e.end_date || "Present"].filter(Boolean).join(" – ");
+      const bullets = (e.bullets||[]).map(b=>`<li>${htmlEscape(b)}</li>`).join("");
+      return `
+        <div class="sec">
+          <strong>${htmlEscape(e.title||"")}</strong> — ${htmlEscape(e.company||"")}
+          <div class="muted">${htmlEscape(period)}</div>
+          ${e.location ? `<div class="muted">${htmlEscape(e.location)}</div>` : ""}
+          ${e.description ? `<div>${htmlEscape(e.description)}</div>` : ""}
+          ${bullets ? `<ul>${bullets}</ul>` : ""}
+        </div>`;
+    }).join("");
+
+    const eduHtml = (cv.education||[]).map(ed=>{
+      const period = [ed.start_date, ed.end_date].filter(Boolean).join(" – ");
+      return `
+        <div class="sec">
+          <strong>${htmlEscape(ed.degree||ed.title||"")}</strong> — ${htmlEscape(ed.institution||"")}
+          ${period ? `<div class="muted">${htmlEscape(period)}</div>` : ""}
+          ${ed.location ? `<div class="muted">${htmlEscape(ed.location)}</div>` : ""}
+          ${ed.details ? `<div>${htmlEscape(ed.details)}</div>` : ""}
+        </div>`;
+    }).join("");
+
+    const langHtml = (cv.languages||[]).map(l=>{
+      const label = [l.name||l.language||l.lang, l.level].filter(Boolean).join(" — ");
+      return `<span class="pill">${htmlEscape(label)}</span>`;
+    }).join("");
+
+    const contactsHtml = contacts.map(c=>`<span class="pill">${htmlEscape(c.value)}</span>`).join("");
+    const skillsHtml = skills.map(s=>`<span class="pill">${htmlEscape(s)}</span>`).join("");
+
+    const summary = cv.summary || pi.summary || "";
+
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${htmlEscape(pi.full_name || "Curriculum Vitae")}</title>
+<style>${buildCss()}</style>
+</head>
+<body>
+  <h1>${htmlEscape(pi.full_name || "")}</h1>
+  <div class="muted">${htmlEscape(pi.headline || "")}</div>
+
+  ${contactsHtml ? `<div class="sec">${contactsHtml}</div>` : ""}
+
+  ${summary ? `<h2>Profile</h2><div>${htmlEscape(summary)}</div>` : ""}
+
+  ${expHtml ? `<h2>Experience</h2>${expHtml}` : ""}
+
+  ${eduHtml ? `<h2>Education</h2>${eduHtml}` : ""}
+
+  ${skillsHtml ? `<h2>Skills</h2><div>${skillsHtml}</div>` : ""}
+
+  ${langHtml ? `<h2>Languages</h2><div>${langHtml}</div>` : ""}
+</body>
+</html>`;
+  }
+
+  async function callRenderPdfHtml({ outName, html, css="" }){
+    const url = withKey(apiUrlRenderHtml());
+    const payload = { out_name: outName, html, css };
     const resp = await fetch(url, { method:'POST', headers: jsonHeaders(), body: JSON.stringify(payload) });
     const text = await resp.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
-    if(!resp.ok) throw new Error(text);
-    xlog("cvagent render →", data);
-    return data;
+    if(!resp.ok) throw new Error(data.error || text || "Export failed");
+    if(!data.pdf_url) throw new Error("No pdf_url returned from renderpdf_html");
+    return data.pdf_url;
   }
 
   function downloadFromUrlToFile(url, filename){
@@ -389,31 +480,27 @@
   $("addEdu").addEventListener('click', ()=> $("eduList").appendChild(eduItem({})));
   $("addLang").addEventListener('click', ()=> $("langList").appendChild(langItem({})));
 
+  // EXPORT → build HTML on client and post to /api/renderpdf_html
   $("btnExport").addEventListener('click', async ()=>{
     const out = $("outName").value.trim() || 'cv.pdf';
-    const tpl = $("tplName").value.trim() || 'cv_europass.html';
     $("exportStatus").textContent = 'Rendering...';
     $("blobLink").textContent=''; $("localLink").textContent='';
     try{
       const cv = collectCV();
-      const res = await callCvAgentRender(cv, out, tpl);
+      const html = buildHtmlFromCv(cv);
+      const css  = ""; // already inlined by buildHtmlFromCv(); keep blank
+
+      const pdfUrl = await callRenderPdfHtml({ outName: out, html, css });
       $("exportStatus").textContent = 'Done.';
-      if(res.url){
-        $("blobLink").innerHTML = `<a href="${res.url}" target="_blank" rel="noopener">Open PDF in Blob</a>`;
-        const a=document.createElement('a'); a.href='#'; a.className='btn secondary'; a.textContent='Download locally';
-        a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(res.url, out); });
-        $("localLink").appendChild(a);
-      } else if(res.content_base64){
-        const bytes = Uint8Array.from(atob(res.content_base64), c=>c.charCodeAt(0));
-        const blob = new Blob([bytes], {type:'application/pdf'});
-        const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=out; a.textContent='Download PDF'; a.className='btn secondary';
-        $("localLink").appendChild(a);
-      } else {
-        $("blobLink").textContent = 'No URL/content in response';
-      }
+      $("blobLink").innerHTML = `<a href="${pdfUrl}" target="_blank" rel="noopener">Open PDF in Blob</a>`;
+
+      const a=document.createElement('a'); a.href='#'; a.className='btn secondary'; a.textContent='Download locally';
+      a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(pdfUrl, out); });
+      $("localLink").appendChild(a);
     }catch(err){
       $("exportStatus").textContent = 'Error';
       xlog("Export error:", err?.message || err);
+      alert('Export error: ' + (err?.message || err));
     }
   });
 

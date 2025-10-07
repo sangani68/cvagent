@@ -24,26 +24,30 @@ except Exception:  # pragma: no cover
 # =============================================================================
 
 def _base_url() -> str:
+    """Build base URL for downstream function calls."""
     override = os.getenv("DOWNSTREAM_BASE_URL")
     if override:
         return override.rstrip("/")
-    host = os.getenv("WEBSITE_HOSTNAME")
+    host = os.getenv("WEBSITE_HOSTNAME")  # e.g., <app>.azurewebsites.net
     if not host:
         raise RuntimeError("WEBSITE_HOSTNAME not set; set DOWNSTREAM_BASE_URL=https://<app>.azurewebsites.net")
     return f"https://{host}"
 
-PPTXEXTRACT_PATH = os.getenv("PPTXEXTRACT_PATH", "/api/pptxextract")  # note the 'x'
+# Paths (overridable by app settings)
+PPTXEXTRACT_PATH = os.getenv("PPTXEXTRACT_PATH", "/api/pptxextract")  # note: 'x'
 CVNORMALIZE_PATH = os.getenv("CVNORMALIZE_PATH", "/api/cvnormalize")
 RENDER_PATH     = os.getenv("RENDER_PATH",     "/api/renderpdf_html")
 
+# Keys: use HOST_KEY for all unless specific ones provided
 HOST_KEY        = os.getenv("HOST_KEY") or os.getenv("DOWNSTREAM_KEY")
 PPTXEXTRACT_KEY = os.getenv("PPTXEXTRACT_KEY", HOST_KEY)
 CVNORMALIZE_KEY = os.getenv("CVNORMALIZE_KEY", HOST_KEY)
 RENDER_KEY      = os.getenv("RENDER_KEY", HOST_KEY)
 
+# Storage / timeouts
 COMING_CONTAINER  = os.getenv("COMING_CONTAINER", "incoming")
 TIMEOUT_EXTRACT   = int(os.getenv("TIMEOUT_EXTRACT", "180"))
-TIMEOUT_NORMALIZE = int(os.getenv("TIMEOUT_NORMALIZE", "180"))
+TIMEOUT_NORMALIZE = int(os.getenv("TIMEOUT_NORMALIZE", "240"))
 TIMEOUT_RENDER    = int(os.getenv("TIMEOUT_RENDER", "300"))
 
 
@@ -52,6 +56,7 @@ TIMEOUT_RENDER    = int(os.getenv("TIMEOUT_RENDER", "300"))
 # =============================================================================
 
 def _call(path: str, key: Optional[str], payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+    """POST JSON to another function, add x-functions-key if provided, return JSON or {'raw': text}."""
     url = f"{_base_url()}{path}"
     headers = {"Content-Type": "application/json"}
     if key:
@@ -90,6 +95,9 @@ def _require_blob_libs():
         raise RuntimeError("azure-storage-blob not available; cannot stage PPTX or generate SAS.")
 
 def _stage_to_incoming(pptx_url: Optional[str], pptx_b64: Optional[str], name_hint: Optional[str]) -> str:
+    """
+    If pptx_url or pptx_b64 is provided, upload it to COMING_CONTAINER and return the blob name.
+    """
     _require_blob_libs()
     conn = os.getenv("AzureWebJobsStorage")
     if not conn:
@@ -122,6 +130,7 @@ def _stage_to_incoming(pptx_url: Optional[str], pptx_b64: Optional[str], name_hi
     return filename
 
 def _sas_url_for_blob(container: str, blob_name: str, ttl_minutes: int = 120) -> str:
+    """Generate a **read** SAS URL for a blob (pptxextract expects 'ppt_blob_sas')."""
     _require_blob_libs()
     conn = os.getenv("AzureWebJobsStorage")
     if not conn:
@@ -150,13 +159,19 @@ def _sas_url_for_blob(container: str, blob_name: str, ttl_minutes: int = 120) ->
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Orchestrates: pptxextract (needs 'ppt_blob_sas') -> cvnormalize -> renderpdf_html
+    Orchestrates: pptxextract (needs 'ppt_blob_sas') -> cvnormalize (text+blocks+hints) -> renderpdf_html
 
-    Body:
-      - pptx_blob | pptx_url | pptx_base64 (+ pptx_name)
-      - file_name (optional; defaults to <source>.pdf)
-      - template (optional), return (optional)
-      - mode: 'normalize_only' to return {cv} without rendering
+    POST body supports:
+    {
+      "file_name": "cv.pdf",              # optional; defaults to <source>.pdf
+      "pptx_blob": "mycv.pptx",           # blob name inside COMING_CONTAINER
+      "pptx_url": "https://...",          # OR: will be staged to COMING_CONTAINER
+      "pptx_base64": "<...>",             # OR: will be staged to COMING_CONTAINER
+      "pptx_name": "input.pptx",          # optional name when staging url/base64
+      "template": "cv_europass.html",     # optional
+      "return": "url",                    # optional hint for renderer
+      "mode": "normalize_only"            # NEW: stop after normalize and return {cv}
+    }
     """
     if req.method != "POST":
         return func.HttpResponse("POST only", status_code=405)
@@ -166,11 +181,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError:
         return func.HttpResponse("Invalid JSON", status_code=400)
 
-    # ---- inputs
+    # Inputs
     file_name     = (body.get("file_name") or "").strip()
     template_name = body.get("template")
     want          = (body.get("return") or "").lower()
-    mode          = (body.get("mode") or "").lower()
+    mode          = (body.get("mode") or "").lower()   # normalize_only / extract_only / cv_only
 
     pptx_blob = body.get("pptx_blob")
     pptx_url  = body.get("pptx_url")
@@ -200,7 +215,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         return func.HttpResponse(f"Could not create SAS for PPTX: {e}", status_code=400)
 
-    # 1) Extract
+    # 1) Extract (now returns slides_text + slides blocks + hints)
     extract_payload = {
         "ppt_blob_sas": sas_url,
         "pptx_blob": pptx_blob,
@@ -213,30 +228,38 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("pptxextract failed")
         return func.HttpResponse(f"pptxextract error: {e}", status_code=502)
 
-    # 2) Normalize (or accept CV)
-    if isinstance(extract_res.get("cv"), dict):
-        cv = extract_res["cv"]
-    else:
-        text = None
-        for k in ("slides_text", "raw", "text", "content"):
-            if extract_res.get(k):
-                text = extract_res[k]
-                break
-        if text is None:
-            return func.HttpResponse(
-                f"pptxextract returned no text/cv. Keys: {list(extract_res.keys())}",
-                status_code=502,
-            )
-        try:
-            norm_res = _call(CVNORMALIZE_PATH, CVNORMALIZE_KEY, {"text": text}, TIMEOUT_NORMALIZE)
-        except Exception as e:
-            logging.exception("cvnormalize failed")
-            return func.HttpResponse(f"cvnormalize error: {e}", status_code=502)
-        cv = norm_res.get("cv") or norm_res.get("normalized") or norm_res
+    # Pull text and rich context
+    text   = None
+    for k in ("slides_text", "raw", "text", "content"):
+        if extract_res.get(k):
+            text = extract_res[k]
+            break
+    blocks = extract_res.get("slides") or extract_res.get("blocks")
+    hints  = extract_res.get("hints")
 
-    # --- normalize-only short-circuit
+    if text is None:
+        return func.HttpResponse(
+            f"pptxextract returned no text/cv. Keys: {list(extract_res.keys())}",
+            status_code=502,
+        )
+
+    # 2) Normalize (AOAI) — pass rich context (PATCH)
+    try:
+        norm_payload = {"text": text, "blocks": blocks, "hints": hints}
+        norm_res = _call(CVNORMALIZE_PATH, CVNORMALIZE_KEY, norm_payload, TIMEOUT_NORMALIZE)
+    except Exception as e:
+        logging.exception("cvnormalize failed")
+        return func.HttpResponse(f"cvnormalize error: {e}", status_code=502)
+
+    cv = norm_res.get("cv") or norm_res.get("normalized") or norm_res
+
+    # --- normalize-only short-circuit for the UI editor
     if mode in ("normalize_only", "extract_only", "cv_only"):
-        return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
+        return func.HttpResponse(
+            json.dumps({"cv": cv}),
+            status_code=200,
+            mimetype="application/json"
+        )
 
     # 3) Render
     render_payload: Dict[str, Any] = {"file_name": file_name, "cv": cv}
@@ -251,4 +274,5 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("renderpdf_html failed")
         return func.HttpResponse(f"renderpdf_html error: {e}", status_code=502)
 
+    # Bubble up renderer response (url or content_base64)
     return func.HttpResponse(json.dumps(render_res), status_code=200, mimetype="application/json")

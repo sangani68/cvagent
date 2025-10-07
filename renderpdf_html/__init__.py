@@ -70,7 +70,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"PDF render error: {e}", status_code=500)
 
     if want == "url":
-        # let cvagent produce SAS; here we just upload
+        # let cvagent produce SAS; here we just upload 
         _upload_pdf(file_name, pdf_bytes)
         return func.HttpResponse(json.dumps({"ok": True, "pdf_blob": file_name}), mimetype="application/json")
 

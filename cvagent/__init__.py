@@ -196,9 +196,9 @@ _EUROPASS_HTML = """<!doctype html>
 
 # --- Kyndryl variant (same layout, brand red sidebar, white text; main stays dark on white) ---
 _KYNDRYL_HTML = _EUROPASS_HTML \
-    .replace('#f8fafc', '#c4122f') \
+    .replace('#f8fafc', '#F9423A') \
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24') \
-    .replace('color:#0f172a', 'color:#fff') \
+    .replace('color:#0f172a', 'color:#0f172a') \
     .replace('background:#fff;', 'background:#fff;color:#0f172a;')
 
 

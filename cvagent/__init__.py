@@ -14,7 +14,7 @@ from azure.storage.blob import (
 from azure.storage.blob._shared.base_client import parse_connection_str
 
 # ==============================================================
-# CONFIG
+# CONFIG 
 # ==============================================================
 BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
             or os.environ.get("FUNCS_BASE_URL") or "").rstrip("/")

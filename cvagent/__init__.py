@@ -1,382 +1,295 @@
-import os
-import json
-import logging
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
-
-import azure.functions as func
+import os, json, logging, base64
 import requests
+from datetime import datetime, timedelta, timezone
+import azure.functions as func
+from jinja2 import Environment, BaseLoader, select_autoescape
 
-# Azure Blob SDK
+# Azure Blob
 from azure.storage.blob import (
     BlobServiceClient,
     ContentSettings,
-    PublicAccess,
     generate_blob_sas,
-    BlobSasPermissions,
+    BlobSasPermissions
 )
+from azure.storage.blob._shared.base_client import parse_connection_str
 
+# ==============================================================
+# CONFIG
+# ==============================================================
+BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
+            or os.environ.get("FUNCS_BASE_URL") or "").rstrip("/")
 
-# ========================
-# Utilities
-# ========================
-def _esc(s: Optional[str]) -> str:
-    if s is None:
-        return ""
-    return (s.replace("&", "&amp;")
-             .replace("<", "&lt;")
-             .replace(">", "&gt;")
-             .replace('"', "&quot;"))
+PPTXEXTRACT_PATH = os.environ.get("PPTXEXTRACT_PATH", "/api/pptxextract")
+CVNORMALIZE_PATH = os.environ.get("CVNORMALIZE_PATH", "/api/cvnormalize")
+RENDER_PATH      = os.environ.get("RENDER_PATH",      "/api/renderpdf_html")
 
-def _get_env(*keys: str, default: Optional[str] = None) -> Optional[str]:
-    for k in keys:
-        v = os.getenv(k)
-        if v:
-            return v
-    return default
+PPTXEXTRACT_KEY  = os.environ.get("PPTXEXTRACT_KEY", "")
+CVNORMALIZE_KEY  = os.environ.get("CVNORMALIZE_KEY", "")
+RENDER_KEY       = os.environ.get("RENDER_KEY", "")
 
-def _get_downstream_code(req: func.HttpRequest) -> Optional[str]:
-    # prefer query param, then header, then env var
-    code = req.params.get("code")
-    if code:
-        return code
-    hdr = req.headers.get("x-functions-key")
-    if hdr:
-        return hdr
-    return _get_env("DOWNSTREAM_FUNCTION_CODE", default=None)
+HTTP_TIMEOUT_SEC   = int(os.environ.get("HTTP_TIMEOUT_SEC", "180"))
+INCOMING_CONTAINER = os.environ.get("INCOMING_CONTAINER", "incoming")
+SAS_MINUTES        = int(os.environ.get("SAS_MINUTES", "120"))
 
-def _abs_api_url(path: str) -> str:
-    p = path if path.startswith("/") else "/" + path
-    host = os.getenv("WEBSITE_HOSTNAME", "").strip()
-    if host:
-        return f"https://{host}{p}"
-    return p
+# ==============================================================
+# STORAGE (derive creds from AzureWebJobsStorage; allow explicit override)
+# ==============================================================
+CONN_STR = os.environ.get("AzureWebJobsStorage")
+if not CONN_STR:
+    raise RuntimeError("AzureWebJobsStorage not set")
 
-def _post_json(url: str, payload: Dict[str, Any], code: Optional[str], timeout: int = 180) -> Dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
-    if code:
-        headers["x-functions-key"] = code
-        url = url + ("&" if "?" in url else "?") + f"code={code}"
-    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    text = r.text
-    try:
-        data = r.json()
-    except Exception:
-        data = {"raw": text}
-    if not r.ok:
-        msg = data.get("error") or data.get("message") or text or f"HTTP {r.status_code}"
-        raise RuntimeError(f"{url} failed {r.status_code}: {msg}")
-    return data
+_bsc = BlobServiceClient.from_connection_string(CONN_STR)
 
-def _safe_b64decode(data_b64: str) -> bytes:
-    s = data_b64.strip()
-    if "," in s and s.lower().startswith("data:"):
-        s = s.split(",", 1)[1]
-    import base64
-    return base64.b64decode(s)
+ACCOUNT_NAME = None
+ACCOUNT_KEY  = None
+try:
+    parsed = parse_connection_str(CONN_STR)
+    ACCOUNT_NAME = parsed.get("account_name")
+    ACCOUNT_KEY  = parsed.get("account_key")
+except Exception as e:
+    logging.error(f"[cvagent] parse_connection_str failed: {e}")
 
+# explicit override wins (Linux env is case sensitive)
+env_name = os.environ.get("STORAGE_ACCOUNT_NAME")
+env_key  = os.environ.get("STORAGE_ACCOUNT_KEY")
+if env_name and env_key:
+    ACCOUNT_NAME, ACCOUNT_KEY = env_name, env_key
 
-# ========================
-# Storage helpers (upload → SAS)
-# ========================
-def _get_blob_service_client() -> BlobServiceClient:
-    account = _get_env("AZURE_STORAGE_ACCOUNT", "STORAGE_ACCOUNT_NAME")
-    key = _get_env("AZURE_STORAGE_KEY", "STORAGE_ACCOUNT_KEY")
-    if not account or not key:
-        raise RuntimeError("Missing storage credentials: set AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY.")
-    conn = f"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={key};EndpointSuffix=core.windows.net"
-    return BlobServiceClient.from_connection_string(conn)
+if ACCOUNT_NAME and ACCOUNT_KEY:
+    logging.info(f"[cvagent] Using storage account: {ACCOUNT_NAME}")
+else:
+    logging.error("[cvagent] Storage account key not available — cannot generate SAS. "
+                  "Set STORAGE_ACCOUNT_NAME and STORAGE_ACCOUNT_KEY or use a full connection string with AccountKey.")
 
-def _ensure_container(bsc: BlobServiceClient, container: str) -> None:
-    try:
-        bsc.create_container(name=container, public_access=PublicAccess.NONE)
-    except Exception as e:
-        if "ContainerAlreadyExists" not in str(e):
-            # container exists: fine; else: bubble up
-            pass
-
-def _upload_pptx_and_get_sas(pptx_b64: str, blob_name: str) -> str:
-    container = _get_env("STORAGE_CONTAINER_INCOMING", default="incoming")
-    expiry_minutes = int(_get_env("SAS_EXPIRY_MINUTES", default="30"))
-    account = _get_env("AZURE_STORAGE_ACCOUNT", "STORAGE_ACCOUNT_NAME")
-    key = _get_env("AZURE_STORAGE_KEY", "STORAGE_ACCOUNT_KEY")
-    if not account or not key:
-        raise RuntimeError("Missing storage credentials: set AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY.")
-
-    bsc = _get_blob_service_client()
-    _ensure_container(bsc, container)
-
-    blob_client = bsc.get_blob_client(container=container, blob=blob_name)
-    try:
-        pptx_bytes = _safe_b64decode(pptx_b64)
-    except Exception:
-        raise RuntimeError("Invalid base64 for PPTX. Send clean base64 (no data: prefix).")
-
-    content = ContentSettings(content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-    blob_client.upload_blob(pptx_bytes, overwrite=True, content_settings=content)
-
-    sas = generate_blob_sas(
-        account_name=account,
-        container_name=container,
-        blob_name=blob_name,
-        account_key=key,
-        permission=BlobSasPermissions(read=True),
-        expiry=datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes),
-    )
-    sas_url = f"https://{account}.blob.core.windows.net/{container}/{blob_name}?{sas}"
-    return sas_url
-
-
-# ========================
-# HTML templates (skills in LEFT column)
-# ========================
-def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
-    pi = cv.get("personal_info", {}) or {}
-    name = _esc(pi.get("full_name", ""))
-    role = _esc(pi.get("headline", ""))
-    location = _esc(", ".join([x for x in [pi.get("city"), pi.get("country")] if x]))
-    summary = _esc(cv.get("summary") or pi.get("summary") or "")
-
-    # Languages (left)
-    langs = cv.get("languages") or []
-    lang_items = []
-    for l in langs:
-        nm = l.get("name") or l.get("language") or l.get("lang") or ""
-        lvl = l.get("level") or ""
-        lang_items.append(_esc(" — ".join([x for x in [nm, lvl] if x])))
-
-    # Skills (left)
-    skills_groups = cv.get("skills_groups") or []
-    flat_skills = []
-    for g in skills_groups:
-        flat_skills.extend(g.get("items") or [])
-    skills_left = ""
-    if flat_skills:
-        chips = "".join(f'<span class="chip">{_esc(s)}</span>' for s in flat_skills)
-        skills_left = f'<div class="sec"><h2>{theme["skillsLabel"]}</h2><div>{chips}</div></div>'
-
-    # Experience (right)
-    exps = cv.get("work_experience") or []
-    parts = []
-    for e in exps:
-        dates = _esc(f'{e.get("start_date","")} – {e.get("end_date","Present")}')
-        bullets = e.get("bullets") or []
-        bhtml = "".join(f"<li>{_esc(b)}</li>" for b in bullets)
-        parts.append(
-            f'''<div style="margin:10px 0 8px 0">
-                <div><strong>{_esc(e.get("title",""))}</strong> — {_esc(e.get("company",""))}</div>
-                <div class="line2">{dates}{(" • "+_esc(e.get("location"))) if e.get("location") else ""}</div>
-                {f'<div style="margin-top:6px">{_esc(e.get("description",""))}</div>' if e.get("description") else ""}
-                {f'<ul>{bhtml}</ul>' if bhtml else ""}
-            </div>'''
-        )
-    exp_html = f'<div class="sec"><h2>{theme["expLabel"]}</h2>{"".join(parts)}</div>' if parts else ""
-
-    # Education (right)
-    edus = cv.get("education") or []
-    edparts = []
-    for ed in edus:
-        dates = _esc((ed.get("start_date") or "") + (f' – {ed.get("end_date")}' if ed.get("end_date") else ""))
-        edparts.append(
-            f'''<div style="margin:10px 0 8px 0">
-                <div><strong>{_esc(ed.get("degree") or ed.get("title") or "")}</strong> — {_esc(ed.get("institution",""))}</div>
-                <div class="line2">{dates}{(" • "+_esc(ed.get("location"))) if ed.get("location") else ""}</div>
-                {f'<div style="margin-top:6px">{_esc(ed.get("details",""))}</div>' if ed.get("details") else ""}
-            </div>'''
-        )
-    edu_html = f'<div class="sec"><h2>{theme["eduLabel"]}</h2>{"".join(edparts)}</div>' if edparts else ""
-
-    photo_b64 = pi.get("photo_base64")
-    photo_tag = f'<div style="text-align:center;margin-bottom:10px"><img class="photo" src="data:image/png;base64,{_esc(photo_b64)}" alt="Profile"/></div>' if photo_b64 else ""
-
-    logo_tag = ""
-    if theme.get("useLogo"):
-        logo_src = theme.get("logoData") or theme.get("logoUrl") or ""
-        if logo_src:
-            logo_tag = f'<div style="text-align:center;margin-top:16px"><img class="logo" src="{_esc(logo_src)}" alt="Logo"/></div>'
-
-    about_block = f'<div class="sec"><h2>{theme["aboutLabel"]}</h2><div>{summary}</div></div><hr class="hr"/>' if summary else ""
-
-    lang_block = ""
-    if lang_items:
-        lis = "".join(f"<li>{_esc(it)}</li>" for it in lang_items)
-        lang_block = f'<div class="sec"><h2>{theme["langLabel"]}</h2><ul style="list-style:none;margin-left:0">{lis}</ul></div>'
-
-    html = f"""<!doctype html><html><head><meta charset="utf-8"/>
-  <style>
-    @page {{ size:A4; margin:0 }} body{{margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#0f172a}}
-    table.layout{{width:100%;border-spacing:0;table-layout:fixed}}
-    td.side{{width:32%;vertical-align:top;background:{theme["sideBg"]};color:{theme["sideFg"]};padding:18px 16px}}
-    td.main{{width:68%;vertical-align:top;padding:20px 22px}}
-    h1{{font-size:24px;margin:0 0 2px 0;color:{theme["nameColor"]}}} .sub{{color:{theme["titleColor"]};font-size:13px;margin:4px 0 12px}}
-    .sec{{margin:14px 0 0}} .sec h2{{font-size:14px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em;color:{theme["hColor"]}}}
-    .chip{{display:inline-block;border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px;border:1px solid {theme["chipBorder"]};background:{theme["chipBg"]};color:{theme["chipFg"]}}}
-    .line2{{color:#64748b;font-size:12px;margin:2px 0}}
-    ul{{margin:6px 0 6px 18px;padding:0}}
-    .logo{{width:110px}}
-    .photo{{width:100px;height:100px;border-radius:50%;object-fit:cover}}
-    .hr{{border:0;border-top:1px solid #e5e7eb;margin:12px 0}}
-  </style></head>
-  <body>
-  <table class="layout"><tr>
-    <td class="side">
-      {photo_tag}
-      <h1>{name}</h1>
-      {f'<div class="sub">{role}</div>' if role else ""}
-      {f'<div class="sub" style="margin-top:0">{location}</div>' if location else ""}
-      {skills_left}
-      {lang_block}
-      {logo_tag}
-    </td>
-    <td class="main">
-      {about_block}
-      {exp_html}
-      {edu_html}
-    </td>
-  </tr></table>
-  </body></html>"""
-    return html
-
-def render_template(template: str, cv: Dict[str, Any], kyndryl_logo_data: Optional[str]) -> str:
-    t = (template or "europass").lower()
-    if t == "kyndryl":
-        theme = {
-            "sideBg": "#FF462D",
-            "sideFg": "#FFFFFF",
-            "nameColor": "#FFFFFF",
-            "titleColor": "#FFFFFF",
-            "hColor": "#FFFFFF",
-            "chipBg": "#FFFFFF",
-            "chipFg": "#FF462D",
-            "chipBorder": "#FFFFFF",
-            "langLabel": "LANGUAGES",
-            "aboutLabel": "ABOUT ME",
-            "expLabel": "PREVIOUS ROLES",
-            "skillsLabel": "SKILLS",
-            "eduLabel": "EDUCATION",
-            "useLogo": True,
-            "logoUrl": "https://upload.wikimedia.org/wikipedia/commons/7/73/Kyndryl_logo.svg",
-            "logoData": kyndryl_logo_data or ""
-        }
-        return _render_euro_like(cv, theme)
+# ==============================================================
+# HELPERS
+# ==============================================================
+def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
+    if path.startswith("http"):
+        url = path
+    elif BASE_URL:
+        url = f"{BASE_URL}{path}"
     else:
-        theme = {
-            "sideBg": "#F8FAFC",
-            "sideFg": "#0F172A",
-            "nameColor": "#0F172A",
-            "titleColor": "#475569",
-            "hColor": "#0F172A",
-            "chipBg": "#EEF2FF",
-            "chipFg": "#3730A3",
-            "chipBorder": "#E0E7FF",
-            "langLabel": "Languages",
-            "aboutLabel": "About Me",
-            "expLabel": "Work Experience",
-            "skillsLabel": "Skills",
-            "eduLabel": "Education & Training",
-            "useLogo": False,
-            "logoUrl": ""
-        }
-        return _render_euro_like(cv, theme)
+        root = req.url.split("/api/")[0]
+        url = f"{root}{path}"
+    if key:
+        url += ("&" if "?" in url else "?") + "code=" + key
+    return url
 
-
-# ========================
-# Orchestration: upload → pptxextract → cvnormalize
-# ========================
-def normalize_from_pptx_b64(req: func.HttpRequest, pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
-    code = _get_downstream_code(req)
-    # 1) upload
-    safe_name = (pptx_name or "input.pptx").replace("\\", "/").split("/")[-1]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    blob_name = f"{stamp}-{safe_name}"
-    sas_url = _upload_pptx_and_get_sas(pptx_b64, blob_name)
-
-    # 2) extract
-    extract_url = _abs_api_url("/api/pptxextract")
-    extract_payload = {"ppt_blob_sas": sas_url, "ppt_name": safe_name}
-    extract_res = _post_json(extract_url, extract_payload, code, timeout=180)
-
-    # 3) normalize
-    normalize_url = _abs_api_url("/api/cvnormalize")
-    normalize_payload = {"parsed": extract_res}
-    norm_res = _post_json(normalize_url, normalize_payload, code, timeout=180)
-
-    return norm_res.get("cv") or norm_res
-
-
-# ========================
-# Render → PDF
-# ========================
-def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
-    endpoint = os.getenv("RENDERPDF_ENDPOINT", "/api/renderpdf_html").strip()
-    url = _abs_api_url(endpoint)
-
-    payload = {"html": html, "file_name": file_name or "cv.pdf", "return": want or "url"}
-    headers = {"Content-Type": "application/json"}
-
+def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC):
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=90)
+        r = requests.post(url, json=payload, timeout=timeout)
+        raw = r.text
+        try:
+            j = r.json()
+        except Exception:
+            j = None
+        return r.status_code, j, raw
     except Exception as e:
-        return {"error": f"Downstream error calling renderer: {e!r}"}
+        return 0, None, f"Network error calling {url}: {e}"
 
-    text = r.text
+def _ensure_container(name: str):
     try:
-        data = r.json()
+        _bsc.create_container(name)
     except Exception:
-        data = {"raw": text}
+        pass
 
-    if not r.ok:
-        err = data.get("error") or data.get("message") or text or f"HTTP {r.status_code}"
-        return {"error": f"Downstream error {r.status_code}: {err}"}
-    return data
+def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
+    if not (ACCOUNT_NAME and ACCOUNT_KEY):
+        raise RuntimeError("Unable to derive storage credentials for SAS")
+    _ensure_container(INCOMING_CONTAINER)
+    bc = _bsc.get_blob_client(INCOMING_CONTAINER, blob_name)
+    bc.upload_blob(
+        pptx_bytes,
+        overwrite=True,
+        content_settings=ContentSettings(
+            content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        ),
+    )
+    account_url = _bsc.url.rstrip("/")
+    blob_url = f"{account_url}/{INCOMING_CONTAINER}/{blob_name}"
+    sas = generate_blob_sas(
+        account_name=ACCOUNT_NAME,
+        container_name=INCOMING_CONTAINER,
+        blob_name=blob_name,
+        account_key=ACCOUNT_KEY,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.now(timezone.utc) + timedelta(minutes=SAS_MINUTES),
+    )
+    signed = f"{blob_url}?{sas}"
+    logging.info(f"[cvagent] SAS generated for {blob_name}")
+    return signed
 
+# ==============================================================
+# TEMPLATE (EUROPASS → HTML)
+# ==============================================================
+_EUROPASS_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"/>
+<title>{{ person.full_name or 'Curriculum Vitae' }}</title>
+<style>
+  @page { size: A4; margin: 10mm }
+  body{margin:0;font-family:"DejaVu Sans",Arial,Helvetica,sans-serif;font-size:12px;color:#0f172a}
+  .eu-root{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
+  .eu-side{background:#f8fafc;border-right:1px solid #e5e7eb;padding:22px}
+  .eu-main{padding:22px 26px}
+  .eu-name{font-size:26px;font-weight:800;margin:0}
+  .eu-title{font-size:13px;color:#475569;margin-top:4px}
+  .eu-kv{display:grid;grid-template-columns:22px 1fr;gap:10px;margin:6px 0}
+  .ico{width:22px;height:22px;border-radius:6px;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:12px}
+  .eu-sec{margin-top:16px}
+  .eu-sec h2{font-size:14px;font-weight:800;margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em}
+  .eu-chip{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #e0e7ff;border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}
+  .eu-job{margin:12px 0 10px}
+  .line2{color:#64748b;font-size:12px;margin-top:2px}
+  .desc{margin-top:6px}
+  .eu-job ul{margin:6px 0 0 18px}
+  .hr{height:1px;background:linear-gradient(90deg,#e5e7eb 60%,transparent 0) repeat-x;background-size:8px 1px;margin:14px 0}
+</style></head>
+<body>
+<div class="eu-root">
+  <aside class="eu-side">
+    <h1 class="eu-name">{{ person.full_name or '' }}</h1>
+    {% if person.title %}<div class="eu-title">{{ person.title }}</div>{% endif %}
+    <div>
+      {% for c in contacts %}
+        <div class="eu-kv"><div class="ico">{{ c.ico }}</div><div>{{ c.txt }}</div></div>
+      {% endfor %}
+    </div>
+    {% if skills %}
+    <div class="eu-sec"><h2>Skills</h2><div>{% for s in skills %}<span class="eu-chip">{{ s }}</span>{% endfor %}</div></div>
+    {% endif %}
+    {% if languages %}
+    <div class="eu-sec"><h2>Languages</h2><div>{% for l in languages %}<span class="eu-chip">{{ l.name }}{% if l.level %} — {{ l.level }}{% endif %}</span>{% endfor %}</div></div>
+    {% endif %}
+  </aside>
+  <main class="eu-main">
+    {% if summary %}
+      <section class="eu-sec"><h2>About Me</h2><div>{{ summary }}</div></section><div class="hr"></div>
+    {% endif %}
+    {% if experiences %}
+      <section class="eu-sec"><h2>Work Experience</h2>
+        {% for e in experiences %}
+          <div class="eu-job">
+            <div class="line1"><strong>{{ e.title }}</strong> — {{ e.company }}</div>
+            <div class="line2">{{ e.start_date }}{% if e.end_date %} – {{ e.end_date }}{% else %} – Present{% endif %}{% if e.location %} • {{ e.location }}{% endif %}</div>
+            {% if e.description %}<div class="desc">{{ e.description }}</div>{% endif %}
+            {% if e.bullets %}<ul>{% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}</ul>{% endif %}
+          </div>
+        {% endfor %}
+      </section>
+    {% endif %}
+    {% if education %}
+      <section class="eu-sec"><h2>Education & Training</h2>
+        {% for ed in education %}
+          <div class="eu-edu">
+            <div class="line1"><strong>{{ ed.degree or ed.title }}</strong> — {{ ed.institution }}</div>
+            <div class="line2">{{ ed.start_date }}{% if ed.end_date %} – {{ ed.end_date }}{% endif %}{% if ed.location %} • {{ ed.location }}{% endif %}</div>
+            {% if ed.details %}<div class="desc">{{ ed.details }}</div>{% endif %}
+          </div>
+        {% endfor %}
+      </section>
+    {% endif %}
+  </main>
+</div>
+</body></html>
+"""
 
-# ========================
-# Azure Function entry
-# ========================
+def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
+    env = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))
+    j = env.from_string(_EUROPASS_HTML)
+    pi = (cv.get("personal_info") or cv.get("personal") or {}) if isinstance(cv, dict) else {}
+    contacts = []
+    def add(icon, val):
+        if val: contacts.append({"ico": icon, "txt": val})
+    add("@",  pi.get("email")); add("☎", pi.get("phone")); add("in", pi.get("linkedin"))
+    add("🌐", pi.get("website"))
+    addr = ", ".join([pi.get("address") or "", pi.get("city") or "", pi.get("country") or ""]).strip(", ")
+    add("📍", addr); add("🎂", pi.get("date_of_birth")); add("⚧", pi.get("gender")); add("🌎", pi.get("nationality"))
+    skills = [s for g in (cv.get("skills_groups") or []) for s in (g.get("items") or [])]
+    model = {
+        "person": {"full_name": pi.get("full_name") or cv.get("name"),
+                   "title":     pi.get("headline")  or cv.get("title")},
+        "contacts": contacts,
+        "skills": skills,
+        "languages": cv.get("languages") or [],
+        "summary": cv.get("summary") or pi.get("summary"),
+        "experiences": cv.get("work_experience") or cv.get("experience") or [],
+        "education": cv.get("education") or [],
+    }
+    return j.render(**model)
+
+# ==============================================================
+# MAIN
+# ==============================================================
 def main(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("cvagent triggered")
     try:
         body = req.get_json()
     except Exception:
         return func.HttpResponse(json.dumps({"error": "Invalid JSON"}), status_code=400, mimetype="application/json")
 
-    mode = (body.get("mode") or "").lower().strip()
-    template = (body.get("template") or "europass").lower().strip()
-    want = (body.get("return") or "url").lower().strip()
-    file_name = body.get("file_name") or "cv.pdf"
-    kyndryl_logo_data = body.get("kyndryl_logo_data")
+    try:
+        # ---------- Extract + Normalize (ALWAYS SAS) ----------
+        if body.get("mode") == "normalize_only":
+            pptx_b64 = body.get("pptx_base64")
+            pptx_name = body.get("pptx_name") or "resume.pptx"
+            if not pptx_b64:
+                return func.HttpResponse(json.dumps({"error": "Missing pptx_base64"}), status_code=400, mimetype="application/json")
 
-    logging.info("cvagent: mode=%s template=%s want=%s file=%s", mode, template, want, file_name)
+            # Decode + upload + sign SAS
+            try:
+                pptx_bytes = base64.b64decode(pptx_b64)
+            except Exception as e:
+                return func.HttpResponse(json.dumps({"error": f"Invalid base64: {e}"}), status_code=400, mimetype="application/json")
 
-    # 1) extract + normalize
-    if mode == "normalize_only":
-        ppt_b64 = body.get("pptx_base64") or body.get("ppt_base64")
-        ppt_name = body.get("pptx_name") or body.get("ppt_name")
-        if not ppt_b64:
-            return func.HttpResponse(json.dumps({"error": "Missing 'pptx_base64'"}), status_code=400, mimetype="application/json")
-        try:
-            cv = normalize_from_pptx_b64(req, ppt_b64, ppt_name)
-        except Exception as e:
-            logging.exception("normalize_only failed")
-            # return a verbose message so you never see "NONE"
-            return func.HttpResponse(json.dumps({"error": f"pptxextract/normalize failed: {e!r}"}), status_code=400, mimetype="application/json")
-        return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
+            ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            blob_name = f"{ts}-{pptx_name}"
+            logging.info(f"[cvagent] Uploading {blob_name} ...")
+            sas_url = _upload_and_sas(pptx_bytes, blob_name)
+            logging.info("[cvagent] SAS ready")
 
-    # 2) render from CV or direct HTML
-    cv = body.get("cv")
-    html = body.get("html")
-    if not html:
-        if not cv:
-            return func.HttpResponse(json.dumps({"error": "Missing 'cv' (or provide 'html')"}), status_code=400, mimetype="application/json")
-        try:
-            html = render_template(template, cv, kyndryl_logo_data)
-        except Exception as e:
-            logging.exception("template render failed")
-            return func.HttpResponse(json.dumps({"error": f"Template render failed: {e!r}"}), status_code=400, mimetype="application/json")
+            # Call extractor that requires ppt_blob_sas
+            extract_url = _build_url(req, PPTXEXTRACT_PATH, PPTXEXTRACT_KEY)
+            s, data, raw = _post_json(extract_url, {"ppt_blob_sas": sas_url, "pptx_name": pptx_name})
+            logging.info(f"[cvagent] extract → {s}")
+            if s != 200 or not isinstance(data, dict):
+                msg = (data.get("error") if isinstance(data, dict) else raw)
+                raise RuntimeError(f"pptxextract failed ({s}): {msg}")
 
-    if want == "html":
-        return func.HttpResponse(json.dumps({"html": html, "file_name": file_name}), status_code=200, mimetype="application/json")
+            raw_cv = data.get("raw") or data.get("raw3") or data
 
-    result = forward_to_renderer(html, file_name, want)
-    status = 200 if not result.get("error") else 400
-    return func.HttpResponse(json.dumps(result), status_code=status, mimetype="application/json")
+            # Normalize
+            normalize_url = _build_url(req, CVNORMALIZE_PATH, CVNORMALIZE_KEY)
+            s2, norm, raw2 = _post_json(normalize_url, {"raw": raw_cv, "pptx_name": pptx_name})
+            logging.info(f"[cvagent] normalize → {s2}")
+            if s2 != 200 or not isinstance(norm, dict):
+                msg = (norm.get("error") if isinstance(norm, dict) else raw2)
+                raise RuntimeError(f"cvnormalize failed ({s2}): {msg}")
+
+            normalized = norm.get("cv") or norm.get("normalized") or norm
+            return func.HttpResponse(json.dumps({"cv": normalized}), status_code=200, mimetype="application/json")
+
+        # ---------- Export (HTML → renderpdf_html) ----------
+        if "cv" in body:
+            cv = body["cv"]
+            out_name = body.get("file_name") or body.get("out_name") or "cv.pdf"
+            template = (body.get("template") or "europass").lower()
+
+            html = _html_from_cv(cv, template)
+            render_url = _build_url(req, RENDER_PATH, RENDER_KEY)
+            payload = {
+                "out_name": out_name if out_name.lower().endswith(".pdf") else out_name + ".pdf",
+                "html": html,
+                "css": ""  # inlined
+            }
+            s3, rjson, rraw = _post_json(render_url, payload)
+            logging.info(f"[cvagent] render → {s3}")
+            if s3 != 200 or not isinstance(rjson, dict):
+                raise RuntimeError(f"renderpdf_html failed ({s3}): {rjson or rraw}")
+            return func.HttpResponse(json.dumps(rjson), status_code=200, mimetype="application/json")
+
+        return func.HttpResponse(json.dumps({"error": "Unsupported request"}), status_code=400, mimetype="application/json")
+
+    except Exception as e:
+        logging.exception("cvagent error")
+        return func.HttpResponse(json.dumps({"error": f"cvagent failed: {str(e)}"}), status_code=500, mimetype="application/json")

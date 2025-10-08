@@ -1,13 +1,23 @@
 import os
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 import azure.functions as func
 import requests
 
+# Azure Blob
+from azure.storage.blob import (
+    BlobServiceClient,
+    ContentSettings,
+    PublicAccess,
+    generate_blob_sas,
+    BlobSasPermissions,
+)
 
-# ---------- Helpers ----------
+
+# ---------- Small utils ----------
 def _esc(s: Optional[str]) -> str:
     if s is None:
         return ""
@@ -17,35 +27,110 @@ def _esc(s: Optional[str]) -> str:
              .replace('"', "&quot;"))
 
 
+def _get_env(*keys: str, default: Optional[str] = None) -> Optional[str]:
+    for k in keys:
+        v = os.getenv(k)
+        if v:
+            return v
+    return default
+
+
 def _get_downstream_code(req: func.HttpRequest) -> Optional[str]:
-    """
-    Get a function key to forward to downstream functions (pptxextract, cvnormalize).
-    Priority:
-      1) caller's ?code=... query
-      2) caller's x-functions-key header
-      3) env DOWNSTREAM_FUNCTION_CODE
-    """
+    """Function key to forward to pptxextract/cvnormalize."""
     code = req.params.get("code")
     if code:
         return code
     hdr = req.headers.get("x-functions-key")
     if hdr:
         return hdr
-    env_code = os.getenv("DOWNSTREAM_FUNCTION_CODE", "").strip()
-    return env_code or None
+    return _get_env("DOWNSTREAM_FUNCTION_CODE", default=None)
 
 
 def _abs_api_url(path: str) -> str:
-    """
-    Build an absolute URL to a sibling function within the same Function App.
-    Accepts '/api/xyz' or 'api/xyz' and returns 'https://<WEBSITE_HOSTNAME>/api/xyz' if available,
-    else returns the relative path (for local dev / same-site calls).
-    """
     p = path if path.startswith("/") else "/" + path
     host = os.getenv("WEBSITE_HOSTNAME", "").strip()
     if host:
         return f"https://{host}{p}"
     return p
+
+
+def _post_json(url: str, payload: Dict[str, Any], code: Optional[str], timeout: int = 180) -> Dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    if code:
+        headers["x-functions-key"] = code
+        url = url + ("&" if "?" in url else "?") + f"code={code}"
+    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    try:
+        data = r.json()
+    except Exception:
+        data = {"raw": r.text}
+    if not r.ok:
+        msg = data.get("error") or data.get("message") or r.text or f"HTTP {r.status_code}"
+        raise RuntimeError(f"{url} failed {r.status_code}: {msg}")
+    return data
+
+
+# ---------- Storage helpers (upload PPTX → SAS) ----------
+def _get_blob_service_client() -> BlobServiceClient:
+    account = _get_env("AZURE_STORAGE_ACCOUNT", "STORAGE_ACCOUNT_NAME")
+    key = _get_env("AZURE_STORAGE_KEY", "STORAGE_ACCOUNT_KEY")
+    if not account or not key:
+        raise RuntimeError("Missing storage credentials: set AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY.")
+    conn = f"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={key};EndpointSuffix=core.windows.net"
+    return BlobServiceClient.from_connection_string(conn)
+
+
+def _ensure_container(bsc: BlobServiceClient, container: str) -> None:
+    try:
+        bsc.create_container(name=container, public_access=PublicAccess.NONE)
+    except Exception as e:
+        # If it already exists, ignore; otherwise rethrow
+        msg = str(e).lower()
+        if "containeralreadyexists" not in msg:
+            raise
+
+
+def _upload_pptx_and_get_sas(pptx_b64: str, blob_name: str) -> str:
+    container = _get_env("STORAGE_CONTAINER_INCOMING", default="incoming")
+    expiry_minutes = int(_get_env("SAS_EXPIRY_MINUTES", default="30"))
+    account = _get_env("AZURE_STORAGE_ACCOUNT", "STORAGE_ACCOUNT_NAME")
+    key = _get_env("AZURE_STORAGE_KEY", "STORAGE_ACCOUNT_KEY")
+    if not account or not key:
+        raise RuntimeError("Missing storage credentials: set AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY.")
+
+    bsc = _get_blob_service_client()
+    _ensure_container(bsc, container)
+
+    blob_client = bsc.get_blob_client(container=container, blob=blob_name)
+    pptx_bytes = None
+    try:
+        pptx_bytes = _safe_b64decode(pptx_b64)
+    except Exception:
+        raise RuntimeError("Invalid base64 PPTX payload. Ensure you're sending base64 data only (no data: prefix).")
+
+    content = ContentSettings(content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    blob_client.upload_blob(pptx_bytes, overwrite=True, content_settings=content)
+
+    # Build SAS for read access
+    sas = generate_blob_sas(
+        account_name=account,
+        container_name=container,
+        blob_name=blob_name,
+        account_key=key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes),
+    )
+    sas_url = f"https://{account}.blob.core.windows.net/{container}/{blob_name}?{sas}"
+    return sas_url
+
+
+def _safe_b64decode(data_b64: str) -> bytes:
+    s = data_b64.strip()
+    # Strip data URL prefix if present
+    if "," in s and s.lower().startswith("data:"):
+        s = s.split(",", 1)[1]
+    import base64
+    return base64.b64decode(s)
 
 
 # ---------- HTML renderer (Skills on LEFT column) ----------
@@ -202,50 +287,33 @@ def render_template(template: str, cv: Dict[str, Any], kyndryl_logo_data: Option
         return _render_euro_like(cv, theme)
 
 
-# ---------- Normalize via sibling functions (with key forwarding) ----------
-def _post_json(url: str, payload: Dict[str, Any], code: Optional[str], timeout: int = 120) -> Dict[str, Any]:
-    if code:
-        # Prefer header for security; also add ?code=... to support both
-        if "?" in url:
-            url += f"&code={code}"
-        else:
-            url += f"?code={code}"
-        headers = {"Content-Type": "application/json", "x-functions-key": code}
-    else:
-        headers = {"Content-Type": "application/json"}
-    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    try:
-        data = r.json()
-    except Exception:
-        data = {"raw": r.text}
-    if not r.ok:
-        msg = data.get("error") or data.get("message") or r.text or f"HTTP {r.status_code}"
-        raise RuntimeError(f"{url} failed {r.status_code}: {msg}")
-    return data
-
-
+# ---------- Normalization orchestration ----------
 def normalize_from_pptx_b64(req: func.HttpRequest, pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
     """
-    Orchestrates:
-      /api/pptxextract  (POST { pptx_base64, pptx_name })
-      /api/cvnormalize  (POST { parsed })
-    Forwards a function key when required to avoid 401.
+    Upload PPTX → SAS → /api/pptxextract → /api/cvnormalize
     """
     code = _get_downstream_code(req)
-    base_extract = _abs_api_url("/api/pptxextract")
-    base_norm = _abs_api_url("/api/cvnormalize")
+    # 1) Upload PPTX to Blob, get SAS URL
+    safe_name = (pptx_name or "input.pptx").replace("\\", "/").split("/")[-1]
+    # Make upload name unique-ish
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    blob_name = f"{ts}-{safe_name}"
+    sas_url = _upload_pptx_and_get_sas(pptx_b64, blob_name)
 
-    extract_payload = {"pptx_base64": pptx_b64, "pptx_name": pptx_name or "input.pptx"}
-    extract_data = _post_json(base_extract, extract_payload, code, timeout=180)
+    # 2) Call pptxextract with SAS (as your deployment expects)
+    extract_url = _abs_api_url("/api/pptxextract")
+    extract_payload = {"ppt_blob_sas": sas_url, "ppt_name": safe_name}
+    extract_data = _post_json(extract_url, extract_payload, code, timeout=180)
 
+    # 3) Call cvnormalize
+    normalize_url = _abs_api_url("/api/cvnormalize")
     normalize_payload = {"parsed": extract_data}
-    norm_data = _post_json(base_norm, normalize_payload, code, timeout=180)
+    norm_data = _post_json(normalize_url, normalize_payload, code, timeout=180)
 
-    # Most normalizers return {"cv": {...}}; accept plain dict too
     return norm_data.get("cv") or norm_data
 
 
-# ---------- Forward to HTML→PDF renderer ----------
+# ---------- Forward to PDF renderer ----------
 def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
     endpoint = os.getenv("RENDERPDF_ENDPOINT", "/api/renderpdf_html").strip()
     url = _abs_api_url(endpoint)
@@ -269,7 +337,7 @@ def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
     return data
 
 
-# ---------- Azure Function main ----------
+# ---------- Azure Function entry ----------
 def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
@@ -284,7 +352,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     logging.info("cvagent: mode=%s template=%s want=%s file=%s", mode, template, want, file_name)
 
-    # ---- 1) Extract + Normalize ----
+    # ---- Extract + Normalize ----
     if mode == "normalize_only":
         ppt_b64 = body.get("pptx_base64") or body.get("ppt_base64")
         ppt_name = body.get("pptx_name") or body.get("ppt_name")
@@ -297,7 +365,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(json.dumps({"error": f"pptxextract/normalize failed: {e}"}), status_code=400, mimetype="application/json")
         return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
 
-    # ---- 2) Render from CV / HTML ----
+    # ---- Render path ----
     cv = body.get("cv")
     html = body.get("html")
     if not html:
@@ -309,11 +377,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logging.exception("template render failed")
             return func.HttpResponse(json.dumps({"error": f"Template render failed: {e}"}), status_code=400, mimetype="application/json")
 
-    # Return raw HTML for debug if requested
     if want == "html":
         return func.HttpResponse(json.dumps({"html": html, "file_name": file_name}), status_code=200, mimetype="application/json")
 
-    # Forward to renderer
     result = forward_to_renderer(html, file_name, want)
     status = 200 if not result.get("error") else 400
     return func.HttpResponse(json.dumps(result), status_code=status, mimetype="application/json")

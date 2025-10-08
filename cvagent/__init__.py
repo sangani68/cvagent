@@ -123,20 +123,6 @@ def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
 # ==============================================================
 # TEMPLATE (EUROPASS → HTML)
 # ==============================================================
-
-# --- Kyndryl variant (red sidebar, white text in second column) ---
-_KYNDRYL_HTML = _EUROPASS_HTML \
-    .replace('#f8fafc', '#c4122f')  # Sidebar background red
-    .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24')  # Sidebar border
-    .replace('background:#fff;color:#0f172a', 'background:#fff;color:#0f172a')  # Ensure dark text on white in second column
-
-_KYNDRYL_HTML = _KYNDRYL_HTML.replace('</style>', r'''
-  /* Kyndryl styling for sidebar */
-  .kynd-logo{margin:0 0 14px 0; display:flex; align-items:center; gap:10px}
-  .kynd-logo svg{height:18px; width:auto; fill:#fff}
-  .eu-side, .eu-side h2, .eu-side .eu-title, .eu-side .eu-name{color:#fff}
-  .eu-side .ico{background:rgba(255,255,255,.18);color:#fff}
-</style>''')
 _EUROPASS_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"/>
 <title>{{ person.full_name or 'Curriculum Vitae' }}</title>
@@ -207,6 +193,14 @@ _EUROPASS_HTML = """<!doctype html>
 </div>
 </body></html>
 """
+
+# --- Kyndryl variant (same layout, brand red sidebar, white text; main stays dark on white) ---
+_KYNDRYL_HTML = _EUROPASS_HTML \
+    .replace('#f8fafc', '#c4122f') \
+    .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24') \
+    .replace('color:#0f172a', 'color:#fff') \
+    .replace('background:#fff;', 'background:#fff;color:#0f172a;')
+
 
 def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     env = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))

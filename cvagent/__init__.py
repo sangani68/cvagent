@@ -1,9 +1,69 @@
-import os, json, logging, base64, requests, azure.functions as func
+import os, json, logging, base64
+import azure.functions as func
+import requests
 from jinja2 import Environment, BaseLoader, select_autoescape
 
-# -------------------------------------------------------------------
-# Jinja2 Europass template (you can later add more templates here )
-# -------------------------------------------------------------------
+# =========================
+# Config (from App Settings)
+# =========================
+BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
+            or os.environ.get("FUNCS_BASE_URL")  # optional alias
+            or "").rstrip("/")
+
+# Downstream paths (these are your other HTTP functions)
+PPTXEXTRACT_PATH  = os.environ.get("PPTXEXTRACT_PATH",  "/api/pptxextract")
+CVNORMALIZE_PATH  = os.environ.get("CVNORMALIZE_PATH",  "/api/cvnormalize")
+RENDER_PATH       = os.environ.get("RENDER_PATH",       "/api/renderpdf_html")
+
+# Optional function keys (leave empty if those funcs are anonymous)
+PPTXEXTRACT_KEY   = os.environ.get("PPTXEXTRACT_KEY",   "")
+CVNORMALIZE_KEY   = os.environ.get("CVNORMALIZE_KEY",   "")
+RENDER_KEY        = os.environ.get("RENDER_KEY",        "")
+
+# Timeouts
+HTTP_TIMEOUT_SEC  = int(os.environ.get("HTTP_TIMEOUT_SEC", "180"))
+
+# =========================
+# HTTP helper
+# =========================
+def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
+    """
+    Build a full URL for downstream calls.
+    If BASE_URL is set, use it; otherwise derive from the current request host.
+    Append ?code=... when key is provided.
+    """
+    if path.startswith("http"):
+        url = path
+    elif BASE_URL:
+        url = f"{BASE_URL}{path}"
+    else:
+        # derive from current request url (same app)
+        # e.g. https://<app>.azurewebsites.net/api/cvagent  -> replace trailing path
+        root = req.url.split("/api/")[0]
+        url = f"{root}{path}"
+    if key:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}code={key}"
+    return url
+
+def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC) -> (int, dict, str):
+    """
+    POST JSON and return (status, json_or_none, raw_text).
+    """
+    try:
+        r = requests.post(url, json=payload, timeout=timeout)
+    except Exception as e:
+        return 0, None, f"Network error calling {url}: {e}"
+    text = r.text
+    try:
+        data = r.json()
+    except Exception:
+        data = None
+    return r.status_code, data, text
+
+# =========================
+# Jinja2 template (europass)
+# =========================
 _EUROPASS_HTML = """<!doctype html>
 <html><head>
 <meta charset="utf-8"/>
@@ -78,21 +138,35 @@ _EUROPASS_HTML = """<!doctype html>
 
 def _build_html_from_cv(cv: dict, template_name: str = "europass") -> str:
     env = Environment(loader=BaseLoader(), autoescape=select_autoescape(['html']))
-    j = env.from_string(_EUROPASS_HTML)
-    pi = (cv.get("personal_info") or {}) if isinstance(cv, dict) else {}
+    tpl = _EUROPASS_HTML  # later: branch by template_name
+    j = env.from_string(tpl)
+
+    pi = (cv.get("personal_info") or cv.get("personal") or {}) if isinstance(cv, dict) else {}
+
+    # contacts
     contacts = []
-    def add(icon, val): 
+    def add(icon, val):
         if val: contacts.append({"ico": icon, "txt": val})
-    add("@", pi.get("email")); add("☎", pi.get("phone")); add("in", pi.get("linkedin"))
+    add("@",  pi.get("email"))
+    add("☎",  pi.get("phone"))
+    add("in", pi.get("linkedin"))
     add("🌐", pi.get("website"))
     addr = ", ".join([pi.get("address") or "", pi.get("city") or "", pi.get("country") or ""]).strip(", ")
     add("📍", addr)
-    add("🎂", pi.get("date_of_birth")); add("⚧", pi.get("gender")); add("🌎", pi.get("nationality"))
+    add("🎂", pi.get("date_of_birth"))
+    add("⚧", pi.get("gender"))
+    add("🌎", pi.get("nationality"))
+
+    # skills
     skills = []
     for g in (cv.get("skills_groups") or []):
         skills.extend(g.get("items") or [])
+
     model = {
-        "person": {"full_name": pi.get("full_name") or cv.get("name"), "title": pi.get("headline") or cv.get("title")},
+        "person": {
+            "full_name": pi.get("full_name") or cv.get("name"),
+            "title":     pi.get("headline")  or cv.get("title"),
+        },
         "contacts": contacts,
         "skills": skills,
         "languages": cv.get("languages") or [],
@@ -102,71 +176,83 @@ def _build_html_from_cv(cv: dict, template_name: str = "europass") -> str:
     }
     return j.render(**model)
 
-# -------------------------------------------------------------------
+# =========================
 # Main HTTP Trigger
-# -------------------------------------------------------------------
+# =========================
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("cvagent function triggered.")
+    logging.info("cvagent: request received")
     try:
         body = req.get_json()
     except Exception:
-        return func.HttpResponse(json.dumps({"error":"Invalid JSON"}), status_code=400, mimetype="application/json")
+        return func.HttpResponse(json.dumps({"error": "Invalid JSON"}), status_code=400, mimetype="application/json")
 
-    # 1️⃣ Extract + Normalize (already working for you)
+    # -------- Extract + Normalize --------
     if body.get("mode") == "normalize_only":
-        # Keep your existing extraction + normalization call
-        try:
-            # Example placeholder for your actual normalize logic
-            # normalized = call_normalize_logic(body)
-            normalized = {"message": "stub normalize — replace with your real code"}
-            return func.HttpResponse(json.dumps(normalized), mimetype="application/json", status_code=200)
-        except Exception as e:
-            logging.exception(e)
-            return func.HttpResponse(json.dumps({"error": f"normalize failed: {str(e)}"}), status_code=500, mimetype="application/json")
+        # Expecting: { pptx_base64, pptx_name }
+        pptx_b64 = body.get("pptx_base64")
+        pptx_name = body.get("pptx_name") or "resume.pptx"
+        if not pptx_b64:
+            return func.HttpResponse(json.dumps({"error": "Missing pptx_base64"}), status_code=400, mimetype="application/json")
 
-    # 2️⃣ Export path: render PDF
+        # 1) Call pptxextract (prefer base64 path)
+        extract_url = _build_url(req, PPTXEXTRACT_PATH, PPTXEXTRACT_KEY)
+        extract_payload = {"pptx_base64": pptx_b64, "pptx_name": pptx_name}
+        s, data, raw = _post_json(extract_url, extract_payload)
+        if s != 200 or not data:
+            msg = data.get("error") if isinstance(data, dict) else raw
+            return func.HttpResponse(
+                json.dumps({"error": f"pptxextract failed ({s}): {msg}"}),
+                status_code=500, mimetype="application/json"
+            )
+
+        # The extractor should return a structured "raw" dict; support common keys:
+        raw_cv = data.get("raw") or data.get("raw3") or data  # be liberal
+        if not isinstance(raw_cv, dict):
+            return func.HttpResponse(json.dumps({"error": "pptxextract returned no structured data"}), status_code=500, mimetype="application/json")
+
+        # 2) Call cvnormalize with the raw extraction
+        normalize_url = _build_url(req, CVNORMALIZE_PATH, CVNORMALIZE_KEY)
+        normalize_payload = {"raw": raw_cv, "pptx_name": pptx_name}
+        s2, norm, raw2 = _post_json(normalize_url, normalize_payload)
+        if s2 != 200 or not norm:
+            msg = norm.get("error") if isinstance(norm, dict) else raw2
+            return func.HttpResponse(
+                json.dumps({"error": f"cvnormalize failed ({s2}): {msg}"}),
+                status_code=500, mimetype="application/json"
+            )
+
+        # Standardize response for the UI:
+        normalized = norm.get("cv") or norm.get("normalized") or norm
+        return func.HttpResponse(json.dumps({"cv": normalized}), status_code=200, mimetype="application/json")
+
+    # -------- Export (Render PDF) --------
     if "cv" in body:
         cv = body.get("cv")
-        out_name = body.get("file_name") or "cv.pdf"
+        out_name = body.get("file_name") or body.get("out_name") or "cv.pdf"
         template = (body.get("template") or "europass").lower()
 
-        # Build HTML for renderer
+        # Build HTML from normalized CV for renderer (renderer expects 'html')
         try:
             html = _build_html_from_cv(cv, template)
         except Exception as e:
+            logging.exception("Template render failed")
             return func.HttpResponse(json.dumps({"error": f"Template render failed: {str(e)}"}), status_code=500, mimetype="application/json")
 
-        # Call renderpdf_html (downstream)
-        base = os.environ.get("DOWNSTREAM_BASE_URL") or os.environ.get("FUNCS_BASE_URL") or ""
-        render_path = os.environ.get("RENDER_PATH", "/api/renderpdf_html")
-        render_key = os.environ.get("RENDER_KEY")
-        render_url = (base.rstrip("/") + render_path) if base else (req.url.replace("/api/cvagent", render_path))
-        if render_key:
-            sep = "&" if "?" in render_url else "?"
-            render_url = f"{render_url}{sep}code={render_key}"
+        render_url = _build_url(req, RENDER_PATH, RENDER_KEY)
+        payload = {"out_name": out_name if out_name.lower().endswith(".pdf") else out_name + ".pdf",
+                   "html": html, "css": ""}
 
-        payload = {"out_name": out_name, "html": html, "css": ""}
-
-        try:
-            r = requests.post(render_url, json=payload, timeout=180)
-        except Exception as e:
-            return func.HttpResponse(json.dumps({"error": f"Failed calling renderer: {str(e)}"}), status_code=502, mimetype="application/json")
-
-        try:
-            data = r.json()
-        except Exception:
-            data = {"raw": r.text}
-
-        if not r.ok:
+        s3, rjson, rraw = _post_json(render_url, payload)
+        if s3 != 200 or not rjson:
             return func.HttpResponse(
-                json.dumps({"error": f"renderpdf_html error: Downstream error {r.status_code} calling {render_path}: {data}"}),
+                json.dumps({"error": f"renderpdf_html error: Downstream error {s3} calling {RENDER_PATH}: {rjson or rraw}"}),
                 status_code=400, mimetype="application/json"
             )
 
-        return func.HttpResponse(json.dumps(data), status_code=200, mimetype="application/json")
+        return func.HttpResponse(json.dumps(rjson), status_code=200, mimetype="application/json")
 
-    # 3️⃣ Default fallback
+    # -------- Fallback --------
     return func.HttpResponse(
-        json.dumps({"error": "Unsupported request. Provide mode:'normalize_only' or {cv,file_name,template}."}),
+        json.dumps({"error": "Unsupported request. Use mode:'normalize_only' for extraction, or provide {cv,file_name,template} for export."}),
         status_code=400, mimetype="application/json"
     )

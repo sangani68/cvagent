@@ -19,10 +19,11 @@
   .toolbar{display:flex;flex-wrap:wrap;gap:8px}
   .list{display:grid;gap:12px}
   .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
-  .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap}
-  #preview-frame{width:100%;height:900px;border:1px solid var(--line);border-radius:12px}
+  .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:260px;overflow:auto;white-space:pre-wrap}
+  #preview-frame{width:100%;height:880px;border:1px solid var(--line);border-radius:12px}
   details[open] summary{margin-bottom:8px}
   summary{cursor:pointer}
+  .ok{color:#16a34a}.err{color:#dc2626}.muted{color:#64748b}
 </style>
 </head>
 <body>
@@ -52,14 +53,14 @@
         <div style="grid-column:1 / -1">
           <label>Kyndryl logo (data URL) — paste your <code>data:image/...;base64,....</code></label>
           <textarea id="kyndrylLogoData" placeholder="data:image/png;base64,iVBORw0K..."></textarea>
-          <div style="color:#64748b;font-size:12px;margin-top:6px">
+          <div class="muted" style="font-size:12px;margin-top:6px">
             If blank, the server uses the default online logo. Using a data URL is most reliable for PDF.
           </div>
         </div>
       </div>
     </details>
 
-    <p style="color:#64748b;margin-top:8px">Same origin → keep Base URL “/”. If hosted elsewhere, use your Function URL with trailing slash.</p>
+    <p class="muted" style="margin-top:8px">Same origin → keep Base URL “/”. If hosted elsewhere, use your Function URL with trailing slash.</p>
   </div>
 
   <!-- Step 1 -->
@@ -113,7 +114,7 @@
     <div style="font-weight:700;margin-top:14px">Summary / About</div>
     <textarea id="cv_summary"></textarea>
 
-    <div style="font-weight:700;margin-top:14px">Skills groups <span style="color:#64748b">(comma-separated items)</span></div>
+    <div style="font-weight:700;margin-top:14px">Skills groups <span class="muted">(comma-separated items)</span></div>
     <div id="skillsList" class="list"></div>
     <div class="toolbar"><button class="btn secondary" type="button" id="addSkillGrp">+ Add group</button></div>
 
@@ -144,15 +145,15 @@
     <div style="font-weight:700;margin-bottom:8px">4) Export PDF</div>
     <div class="toolbar">
       <button class="btn" id="btnExport">Export PDF</button>
-      <div id="exportStatus" style="margin-left:8px;color:#64748b"></div>
+      <div id="exportStatus" style="margin-left:8px" class="muted"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
       <div>
-        <div style="color:#64748b">Blob link</div>
+        <div class="muted">Blob link</div>
         <div id="blobLink" style="margin-top:8px"></div>
       </div>
       <div style="text-align:right">
-        <div style="color:#64748b">Local download</div>
+        <div class="muted">Local download</div>
         <div id="localLink" style="margin-top:8px"></div>
       </div>
     </div>
@@ -177,7 +178,6 @@ function buildBase(){ const v = $("baseUrl").value.trim() || "/"; return v.endsW
 function withKey(url){ const key = $("funcKey").value.trim(); return key ? url + (url.includes("?")?"&":"?") + "code=" + encodeURIComponent(key) : url; }
 function cvagentUrl(){ const route = ($("cvagentPath").value || "api/cvagent").replace(/^\/+/, ""); return withKey(buildBase() + route); }
 
-/* ---------- output filename logic ---------- */
 let currentSourceName = null;
 function baseName(name){
   if(!name) return "cv";
@@ -191,7 +191,6 @@ function computeOutName(){
 }
 function updateOutName(){ $("outName").value = computeOutName(); }
 
-/* ---------- UI builders ---------- */
 function el(tag, attrs={}, ...children){
   const e=document.createElement(tag);
   for(const [k,v] of Object.entries(attrs)){ if(k==="class") e.className=v; else if(k==="value") e.value=v; else e.setAttribute(k,v); }
@@ -201,7 +200,7 @@ function el(tag, attrs={}, ...children){
 function skillsItem(grp={group:"", items:[]}){ const w=el('div',{class:'item'});
   const g=el('input',{value:grp.group||'',placeholder:'Group (e.g., Tech)'}); const it=el('input',{value:(grp.items||[]).join(', '),placeholder:'Items (comma separated)'});
   w.append(el('label',{},'Group'),g,el('label',{},'Items'),it); w._get=()=>({group:g.value.trim(),items:it.value.split(',').map(s=>s.trim()).filter(Boolean)}); return w; }
-function jobItem(j={}){ const w=el('div',{class:'item'}),t=el('input',{value:j.title||'',placeholder:'Title'}),c=el('input',{value=j.company||'',placeholder:'Company'}),l=el('input',{value:j.location||'',placeholder:'Location'}),sd=el('input',{value:j.start_date||'',placeholder:'Start'}),ed=el('input',{value:j.end_date||'',placeholder:'End/Present'}),d=el('textarea',{placeholder:'Description'}),b=el('textarea',{placeholder:'Bullets (one per line)'}); d.value=j.description||''; b.value=(j.bullets||[]).join('\n');
+function jobItem(j={}){ const w=el('div',{class:'item'}),t=el('input',{value:j.title||'',placeholder:'Title'}),c=el('input',{value:j.company||'',placeholder:'Company'}),l=el('input',{value:j.location||'',placeholder:'Location'}),sd=el('input',{value:j.start_date||'',placeholder:'Start'}),ed=el('input',{value:j.end_date||'',placeholder:'End/Present'}),d=el('textarea',{placeholder:'Description'}),b=el('textarea',{placeholder:'Bullets (one per line)'}); d.value=j.description||''; b.value=(j.bullets||[]).join('\n');
   w.append(el('label',{},'Title'),t,el('label',{},'Company'),c,el('label',{},'Location'),l,el('div',{class:'row'},el('div',{},el('label',{},'Start'),sd),el('div',{},el('label',{},'End'),ed)),el('label',{},'Description'),d,el('label',{},'Bullets'),b);
   w._get=()=>({title:t.value.trim(),company:c.value.trim(),location:l.value.trim(),start_date:sd.value.trim(),end_date:ed.value.trim(),description:d.value.trim(),bullets:b.value.split('\n').map(s=>s.trim()).filter(Boolean)}); return w; }
 function eduItem(e={}){ const w=el('div',{class:'item'}),deg=el('input',{value:e.degree||e.title||'',placeholder:'Degree / Title'}),inst=el('input',{value:e.institution||'',placeholder:'Institution'}),l=el('input',{value:e.location||'',placeholder:'Location'}),sd=el('input',{value:e.start_date||'',placeholder:'Start'}),ed=el('input',{value:e.end_date||'',placeholder:'End'}),det=el('textarea',{placeholder:'Details'}); det.value=e.details||'';
@@ -312,7 +311,6 @@ function euroLikeTemplate(cv, theme){
   </tr></table>
   </body></html>`;
 }
-
 function tpl_europass(cv){
   const theme = {
     sideBg:"#F8FAFC", sideFg:"#0F172A", nameColor:"#0F172A", titleColor:"#475569", hColor:"#0F172A",
@@ -331,8 +329,6 @@ function tpl_kyndryl(cv){
   };
   return euroLikeTemplate(cv, theme);
 }
-
-/* preview router */
 function renderTemplate(name, cv){
   switch((name||"europass").toLowerCase()){
     case "kyndryl": return tpl_kyndryl(cv);
@@ -353,13 +349,17 @@ async function callCvAgentNormalizeOnly(file){
   const dbg=$("extractLog"); dbg.style.display='block'; dbg.textContent='Preparing…';
   const b64=await fileToBase64(file); const kb=Math.round((b64.length*3/4)/1024);
   const payload={ pptx_base64:b64, pptx_name:file.name, mode:"normalize_only" };
-  const url=cvagentUrl(); dbg.textContent=`POST ${url}\nfile: ${file.name} (~${kb} KB)`;
+  const url=cvagentUrl();
+  dbg.textContent=`POST ${url}\nfile: ${file.name} (~${kb} KB)\nbody keys: ${Object.keys(payload).join(", ")}`;
   let resp,text,data;
   try{ resp=await fetch(url,{method:'POST',headers:jsonHeaders(),body:JSON.stringify(payload)}); }
   catch(e){ dbg.textContent+=`\nNetwork error: ${e.message}`; throw new Error(`Network error calling cvagent: ${e.message}`); }
-  text=await resp.text(); try{ data=JSON.parse(text);}catch{ data={raw:text}; }
-  dbg.textContent+=`\nstatus: ${resp.status}`; if(!resp.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${resp.status}`; dbg.textContent+=`\nerror: ${msg}`; throw new Error(msg); }
-  dbg.textContent+=`\n✓ normalize_only OK`; return (data.cv||data.normalized||data.result||data);
+  text=await resp.text();
+  dbg.textContent+=`\nstatus: ${resp.status}\nresponse head: ${text.slice(0,200)}${text.length>200?'…':''}`;
+  try{ data=JSON.parse(text);}catch{ data={raw:text}; }
+  if(!resp.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${resp.status}`; throw new Error(msg); }
+  if(!data || !(data.cv || data.normalized || data.result)){ throw new Error("No normalized CV found in response (expected 'cv' field)."); }
+  return (data.cv||data.normalized||data.result);
 }
 
 /* ---------- EXPORT (via cvagent) ---------- */
@@ -374,10 +374,17 @@ async function exportViaCvAgent(){
     if(logoData){ payload.kyndryl_logo_data = logoData; }
   }
   const url=cvagentUrl();
+  xlog("EXPORT →", url, payload);
   const res=await fetch(url,{method:'POST',headers:jsonHeaders(),body:JSON.stringify(payload)});
   const text=await res.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
   if(!res.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${res.status}`; throw new Error(`cvagent render failed: ${msg}`); }
-  const pdfUrl=data.pdf_url||data.url||data.sas_url||data.link; if(!pdfUrl) throw new Error("No pdf_url returned by cvagent/render");
+  const pdfUrl=data.pdf_url||data.url||data.sas_url||data.link;
+  if(!pdfUrl && data.html){ // safe fallback for debugging
+    const blob = new Blob([data.html],{type:"text/html"});
+    const htmlUrl = URL.createObjectURL(blob);
+    return { pdfUrl: htmlUrl, out: out.replace(/\.pdf$/i,".html"), isHtml:true };
+  }
+  if(!pdfUrl) throw new Error("No pdf_url returned by cvagent/render");
   return { pdfUrl, out };
 }
 
@@ -392,24 +399,34 @@ $("templateName").addEventListener('change', ()=>{
   refreshPreview();
 });
 
+function busy(b){ $("btnExtract").disabled=b; $("btnExport").disabled=b; }
+
 $("btnExtract").addEventListener('click', async ()=>{
-  const f=$("pptxFile").files[0]; if(!f){ alert('Choose a PPTX first'); return; }
-  try{ const cv=await callCvAgentNormalizeOnly(f); fillForm(cv); $("extractLog").textContent += '\nDone. You can edit below.'; }
-  catch(e){ alert('Extract error: '+(e.message||e)); }
+  const f=$("pptxFile").files[0];
+  $("extractLog").style.display='block';
+  $("extractLog").textContent='';
+  if(!f){ $("extractLog").textContent='Please choose a PPTX first.'; alert('Choose a PPTX first'); return; }
+  busy(true);
+  try{
+    const cv=await callCvAgentNormalizeOnly(f);
+    $("extractLog").textContent += `\n✓ normalize_only OK`;
+    fillForm(cv);
+    $("extractLog").textContent += '\nDone. You can edit below.';
+  }catch(e){
+    $("extractLog").textContent += `\n✗ Error: ${e.message||e}`;
+    alert('Extract error: '+(e.message||e));
+  }finally{ busy(false); }
 });
 
 $("btnLoadSample").addEventListener('click', ()=>{
-  currentSourceName = null; // no file; will use cv-<template>.pdf
-  updateOutName();
+  currentSourceName = null; updateOutName();
   fillForm({
     personal_info:{ full_name:'Ada Lovelace', headline:'Computing Pioneer', city:'London', country:'UK', email:'ada@example.com', linkedin:'linkedin.com/in/ada' },
     summary:'Visionary mathematician; wrote the first algorithm intended to be executed by a machine.',
     skills_groups:[{group:'Tech', items:['Analysis','Algorithms','Mathematics']}],
     work_experience:[{title:'Analyst', company:'Analytical Engine', start_date:'1842', end_date:'1852', location:'London', bullets:['Translated Menabrea','Conceived loop & subroutine']}],
     education:[{degree:'Mathematics', institution:'Private tutelage', start_date:'1830', end_date:'1840'}],
-    languages:[{name:'English', level:'Native'}],
-    achievements:['Pioneer work on algorithms'],
-    certifications:['Royal Society lectures']
+    languages:[{name:'English', level:'Native'}]
   });
 });
 
@@ -422,14 +439,18 @@ $("btnRefreshPreview").addEventListener('click', refreshPreview);
 
 $("btnExport").addEventListener('click', async ()=>{
   $("exportStatus").textContent='Rendering…'; $("blobLink").innerHTML=''; $("localLink").innerHTML='';
+  busy(true);
   try{
-    const { pdfUrl, out } = await exportViaCvAgent();
-    $("exportStatus").textContent='Done.';
-    $("blobLink").innerHTML=`<a href="${pdfUrl}" target="_blank" rel="noopener">Open PDF in Blob</a>`;
+    const { pdfUrl, out, isHtml } = await exportViaCvAgent();
+    $("exportStatus").innerHTML='<span class="ok">Done.</span>';
+    $("blobLink").innerHTML=`<a href="${pdfUrl}" target="_blank" rel="noopener">${isHtml?'Open HTML preview':'Open PDF in Blob'}</a>`;
     const a=document.createElement('a'); a.href='#'; a.className='btn secondary'; a.textContent='Download locally';
     a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(pdfUrl, out); });
     $("localLink").appendChild(a);
-  }catch(e){ $("exportStatus").textContent='Error'; alert(e.message||e); }
+  }catch(e){
+    $("exportStatus").innerHTML='<span class="err">Error</span>';
+    alert(e.message||e);
+  }finally{ busy(false); }
 });
 
 /* auto-fill base when hosted on the Function App */

@@ -2,7 +2,7 @@ import os, json, logging, base64, requests, azure.functions as func
 from jinja2 import Environment, BaseLoader, select_autoescape
 
 # -------------------------------------------------------------------
-# Jinja2 Europass template (you can later add more templates here)
+# Jinja2 Europass template (you can later add more templates here )
 # -------------------------------------------------------------------
 _EUROPASS_HTML = """<!doctype html>
 <html><head>

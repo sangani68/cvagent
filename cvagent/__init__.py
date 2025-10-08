@@ -14,7 +14,7 @@ from azure.storage.blob import (
 from azure.storage.blob._shared.base_client import parse_connection_str
 
 # ==============================================================
-# CONFIG 
+# CONFIG
 # ==============================================================
 BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
             or os.environ.get("FUNCS_BASE_URL") or "").rstrip("/")
@@ -194,7 +194,7 @@ _EUROPASS_HTML = """<!doctype html>
 </body></html>
 """
 
-# --- Kyndryl variant (same layout, correct brand red, white text) ---
+# --- Kyndryl variant (same layout, brand red sidebar, white text; main stays dark on white) ---
 _KYNDRYL_HTML = _EUROPASS_HTML \
     .replace('#f8fafc', '#c4122f') \
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24') \

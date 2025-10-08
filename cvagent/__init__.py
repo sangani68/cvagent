@@ -1,10 +1,10 @@
-import os, json, logging, base64, io
+import os, json, logging, base64
 import requests
 from datetime import datetime, timedelta, timezone
 import azure.functions as func
 from jinja2 import Environment, BaseLoader, select_autoescape
 
-# Azure Blob SDK (only used if we need SAS fallback)
+# Azure Blob
 from azure.storage.blob import (
     BlobServiceClient,
     ContentSettings,
@@ -13,55 +13,58 @@ from azure.storage.blob import (
 )
 from azure.storage.blob._shared.base_client import parse_connection_str
 
-
 # ==============================================================
-# CONFIGURATION
+# CONFIG
 # ==============================================================
 BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
             or os.environ.get("FUNCS_BASE_URL") or "").rstrip("/")
 
-# Your downstream routes (HTTP-trigger Functions)
 PPTXEXTRACT_PATH = os.environ.get("PPTXEXTRACT_PATH", "/api/pptxextract")
 CVNORMALIZE_PATH = os.environ.get("CVNORMALIZE_PATH", "/api/cvnormalize")
 RENDER_PATH      = os.environ.get("RENDER_PATH",      "/api/renderpdf_html")
 
-# Optional keys for those functions (if authLevel=function)
-PPTXEXTRACT_KEY = os.environ.get("PPTXEXTRACT_KEY", "")
-CVNORMALIZE_KEY = os.environ.get("CVNORMALIZE_KEY", "")
-RENDER_KEY      = os.environ.get("RENDER_KEY", "")
+PPTXEXTRACT_KEY  = os.environ.get("PPTXEXTRACT_KEY", "")
+CVNORMALIZE_KEY  = os.environ.get("CVNORMALIZE_KEY", "")
+RENDER_KEY       = os.environ.get("RENDER_KEY", "")
 
 HTTP_TIMEOUT_SEC   = int(os.environ.get("HTTP_TIMEOUT_SEC", "180"))
 INCOMING_CONTAINER = os.environ.get("INCOMING_CONTAINER", "incoming")
 SAS_MINUTES        = int(os.environ.get("SAS_MINUTES", "120"))
 
-# Storage (for SAS fallback only)
+# ==============================================================
+# STORAGE (derive creds from AzureWebJobsStorage; allow explicit override)
+# ==============================================================
 CONN_STR = os.environ.get("AzureWebJobsStorage")
-_bsc = BlobServiceClient.from_connection_string(CONN_STR) if CONN_STR else None
+if not CONN_STR:
+    raise RuntimeError("AzureWebJobsStorage not set")
+
+_bsc = BlobServiceClient.from_connection_string(CONN_STR)
+
 ACCOUNT_NAME = None
 ACCOUNT_KEY  = None
 try:
-    if CONN_STR:
-        parsed = parse_connection_str(CONN_STR)
-        ACCOUNT_NAME = parsed.get("account_name")
-        ACCOUNT_KEY  = parsed.get("account_key")
-    # explicit override wins (Linux is case sensitive)
-    env_name = os.environ.get("STORAGE_ACCOUNT_NAME")
-    env_key  = os.environ.get("STORAGE_ACCOUNT_KEY")
-    if env_name and env_key:
-        ACCOUNT_NAME, ACCOUNT_KEY = env_name, env_key
-    if ACCOUNT_NAME and ACCOUNT_KEY:
-        logging.info(f"[cvagent] Storage account available: {ACCOUNT_NAME}")
-    else:
-        logging.warning("[cvagent] Storage account key not available — base64 path will be used; SAS fallback only if creds present.")
+    parsed = parse_connection_str(CONN_STR)
+    ACCOUNT_NAME = parsed.get("account_name")
+    ACCOUNT_KEY  = parsed.get("account_key")
 except Exception as e:
-    logging.error(f"[cvagent] Could not parse AzureWebJobsStorage: {e}")
+    logging.error(f"[cvagent] parse_connection_str failed: {e}")
 
+# explicit override wins (Linux env is case sensitive)
+env_name = os.environ.get("STORAGE_ACCOUNT_NAME")
+env_key  = os.environ.get("STORAGE_ACCOUNT_KEY")
+if env_name and env_key:
+    ACCOUNT_NAME, ACCOUNT_KEY = env_name, env_key
+
+if ACCOUNT_NAME and ACCOUNT_KEY:
+    logging.info(f"[cvagent] Using storage account: {ACCOUNT_NAME}")
+else:
+    logging.error("[cvagent] Storage account key not available — cannot generate SAS. "
+                  "Set STORAGE_ACCOUNT_NAME and STORAGE_ACCOUNT_KEY or use a full connection string with AccountKey.")
 
 # ==============================================================
-# SMALL UTILITIES
+# HELPERS
 # ==============================================================
 def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
-    """Build absolute URL to a downstream function, appending ?code=... if needed."""
     if path.startswith("http"):
         url = path
     elif BASE_URL:
@@ -74,7 +77,6 @@ def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
     return url
 
 def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC):
-    """POST JSON and return (status, json_or_none, raw_text)."""
     try:
         r = requests.post(url, json=payload, timeout=timeout)
         raw = r.text
@@ -87,16 +89,14 @@ def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC):
         return 0, None, f"Network error calling {url}: {e}"
 
 def _ensure_container(name: str):
-    if not _bsc: return
     try:
         _bsc.create_container(name)
     except Exception:
         pass
 
 def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
-    """Upload PPTX and return a signed read SAS URL (requires ACCOUNT_KEY)."""
-    if not (_bsc and ACCOUNT_NAME and ACCOUNT_KEY):
-        raise RuntimeError("SAS credentials not available in this environment")
+    if not (ACCOUNT_NAME and ACCOUNT_KEY):
+        raise RuntimeError("Unable to derive storage credentials for SAS")
     _ensure_container(INCOMING_CONTAINER)
     bc = _bsc.get_blob_client(INCOMING_CONTAINER, blob_name)
     bc.upload_blob(
@@ -116,11 +116,12 @@ def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
         permission=BlobSasPermissions(read=True),
         expiry=datetime.now(timezone.utc) + timedelta(minutes=SAS_MINUTES),
     )
-    return f"{blob_url}?{sas}"
-
+    signed = f"{blob_url}?{sas}"
+    logging.info(f"[cvagent] SAS generated for {blob_name}")
+    return signed
 
 # ==============================================================
-# CLIENT-SIDE TEMPLATE → HTML (EUROPASS)
+# TEMPLATE (EUROPASS → HTML)
 # ==============================================================
 _EUROPASS_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"/>
@@ -149,43 +150,65 @@ _EUROPASS_HTML = """<!doctype html>
   <aside class="eu-side">
     <h1 class="eu-name">{{ person.full_name or '' }}</h1>
     {% if person.title %}<div class="eu-title">{{ person.title }}</div>{% endif %}
-    <div>{% for c in contacts %}<div class="eu-kv"><div class="ico">{{ c.ico }}</div><div>{{ c.txt }}</div></div>{% endfor %}</div>
-    {% if skills %}<div class="eu-sec"><h2>Skills</h2><div>{% for s in skills %}<span class="eu-chip">{{ s }}</span>{% endfor %}</div></div>{% endif %}
-    {% if languages %}<div class="eu-sec"><h2>Languages</h2><div>{% for l in languages %}<span class="eu-chip">{{ l.name }}{% if l.level %} — {{ l.level }}{% endif %}</span>{% endfor %}</div></div>{% endif %}
+    <div>
+      {% for c in contacts %}
+        <div class="eu-kv"><div class="ico">{{ c.ico }}</div><div>{{ c.txt }}</div></div>
+      {% endfor %}
+    </div>
+    {% if skills %}
+    <div class="eu-sec"><h2>Skills</h2><div>{% for s in skills %}<span class="eu-chip">{{ s }}</span>{% endfor %}</div></div>
+    {% endif %}
+    {% if languages %}
+    <div class="eu-sec"><h2>Languages</h2><div>{% for l in languages %}<span class="eu-chip">{{ l.name }}{% if l.level %} — {{ l.level }}{% endif %}</span>{% endfor %}</div></div>
+    {% endif %}
   </aside>
   <main class="eu-main">
-    {% if summary %}<section class="eu-sec"><h2>About Me</h2><div>{{ summary }}</div></section><div class="hr"></div>{% endif %}
+    {% if summary %}
+      <section class="eu-sec"><h2>About Me</h2><div>{{ summary }}</div></section><div class="hr"></div>
+    {% endif %}
     {% if experiences %}
-      <section class="eu-sec"><h2>Work Experience</h2>{% for e in experiences %}
-        <div class="eu-job"><div class="line1"><strong>{{ e.title }}</strong> — {{ e.company }}</div>
-        <div class="line2">{{ e.start_date }}{% if e.end_date %} – {{ e.end_date }}{% else %} – Present{% endif %}{% if e.location %} • {{ e.location }}{% endif %}</div>
-        {% if e.description %}<div class="desc">{{ e.description }}</div>{% endif %}
-        {% if e.bullets %}<ul>{% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}</ul>{% endif %}</div>{% endfor %}</section>
+      <section class="eu-sec"><h2>Work Experience</h2>
+        {% for e in experiences %}
+          <div class="eu-job">
+            <div class="line1"><strong>{{ e.title }}</strong> — {{ e.company }}</div>
+            <div class="line2">{{ e.start_date }}{% if e.end_date %} – {{ e.end_date }}{% else %} – Present{% endif %}{% if e.location %} • {{ e.location }}{% endif %}</div>
+            {% if e.description %}<div class="desc">{{ e.description }}</div>{% endif %}
+            {% if e.bullets %}<ul>{% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}</ul>{% endif %}
+          </div>
+        {% endfor %}
+      </section>
     {% endif %}
     {% if education %}
-      <section class="eu-sec"><h2>Education & Training</h2>{% for ed in education %}
-        <div class="eu-edu"><div class="line1"><strong>{{ ed.degree or ed.title }}</strong> — {{ ed.institution }}</div>
-        <div class="line2">{{ ed.start_date }}{% if ed.end_date %} – {{ ed.end_date }}{% endif %}{% if ed.location %} • {{ ed.location }}{% endif %}</div>
-        {% if ed.details %}<div class="desc">{{ ed.details }}</div>{% endif %}</div>{% endfor %}</section>
+      <section class="eu-sec"><h2>Education & Training</h2>
+        {% for ed in education %}
+          <div class="eu-edu">
+            <div class="line1"><strong>{{ ed.degree or ed.title }}</strong> — {{ ed.institution }}</div>
+            <div class="line2">{{ ed.start_date }}{% if ed.end_date %} – {{ ed.end_date }}{% endif %}{% if ed.location %} • {{ ed.location }}{% endif %}</div>
+            {% if ed.details %}<div class="desc">{{ ed.details }}</div>{% endif %}
+          </div>
+        {% endfor %}
+      </section>
     {% endif %}
   </main>
-</div></body></html>
+</div>
+</body></html>
 """
 
 def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     env = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))
     j = env.from_string(_EUROPASS_HTML)
-    pi = (cv.get("personal_info") or cv.get("personal") or {})
+    pi = (cv.get("personal_info") or cv.get("personal") or {}) if isinstance(cv, dict) else {}
     contacts = []
     def add(icon, val):
         if val: contacts.append({"ico": icon, "txt": val})
-    add("@", pi.get("email")); add("☎", pi.get("phone")); add("in", pi.get("linkedin"))
+    add("@",  pi.get("email")); add("☎", pi.get("phone")); add("in", pi.get("linkedin"))
     add("🌐", pi.get("website"))
-    addr = ", ".join(filter(None, [pi.get("address"), pi.get("city"), pi.get("country")]))
+    addr = ", ".join([pi.get("address") or "", pi.get("city") or "", pi.get("country") or ""]).strip(", ")
     add("📍", addr); add("🎂", pi.get("date_of_birth")); add("⚧", pi.get("gender")); add("🌎", pi.get("nationality"))
     skills = [s for g in (cv.get("skills_groups") or []) for s in (g.get("items") or [])]
     model = {
-        "person": {"full_name": pi.get("full_name") or cv.get("name"), "title": pi.get("headline") or cv.get("title")},
+        "person": {"full_name": pi.get("full_name") or cv.get("name"),
+                   "title":     pi.get("headline")  or cv.get("title")},
         "contacts": contacts,
         "skills": skills,
         "languages": cv.get("languages") or [],
@@ -195,72 +218,8 @@ def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     }
     return j.render(**model)
 
-
 # ==============================================================
-# EXTRACT → NORMALIZE
-#  - Try base64-first (your earlier working path)
-#  - If extractor complains it wants SAS, fallback to Blob+SAS
-# ==============================================================
-def _extract_then_normalize(req: func.HttpRequest, pptx_b64: str, pptx_name: str):
-    # 1) Try base64 extractor
-    extract_url = _build_url(req, PPTXEXTRACT_PATH, PPTXEXTRACT_KEY)
-    base64_payload = {"pptx_base64": pptx_b64, "pptx_name": pptx_name}
-    s1, d1, raw1 = _post_json(extract_url, base64_payload)
-    logging.info(f"[cvagent] extract(base64) → {s1}")
-
-    # Success → go normalize
-    if s1 == 200 and isinstance(d1, dict):
-        raw_cv = d1.get("raw") or d1.get("raw3") or d1
-        return _normalize(req, raw_cv, pptx_name)
-
-    # If the extractor clearly wants SAS, try SAS fallback
-    need_sas = (s1 in (400, 415)) and isinstance(d1, dict) and any(
-        k in (d1.get("error") or d1.get("message") or "").lower() for k in ["sas", "ppt_blob_sas", "pptx_blob_sas"]
-    )
-    if need_sas:
-        if not (ACCOUNT_NAME and ACCOUNT_KEY and _bsc):
-            # Can't do SAS here; bubble the original error with a clearer message
-            msg = (d1.get("error") or raw1) if isinstance(d1, dict) else raw1
-            raise RuntimeError(f"Extractor requires SAS, but storage credentials are unavailable. Downstream said: {msg}")
-
-        # Decode base64, upload, generate SAS
-        try:
-            pptx_bytes = base64.b64decode(pptx_b64)
-        except Exception as e:
-            raise RuntimeError(f"Invalid base64: {e}")
-        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        blob_name = f"{ts}-{pptx_name}"
-        sas_url = _upload_and_sas(pptx_bytes, blob_name)
-
-        # Try extractor again with SAS
-        sas_payload = {"ppt_blob_sas": sas_url, "pptx_name": pptx_name}
-        s2, d2, raw2 = _post_json(extract_url, sas_payload)
-        logging.info(f"[cvagent] extract(SAS) → {s2}")
-        if s2 != 200 or not isinstance(d2, dict):
-            msg = (d2.get("error") if isinstance(d2, dict) else raw2)
-            raise RuntimeError(f"pptxextract failed ({s2}): {msg}")
-
-        raw_cv = d2.get("raw") or d2.get("raw3") or d2
-        return _normalize(req, raw_cv, pptx_name)
-
-    # Otherwise, pass through the original error
-    msg = (d1.get("error") if isinstance(d1, dict) else raw1) or f"HTTP {s1}"
-    raise RuntimeError(f"pptxextract failed ({s1}): {msg}")
-
-def _normalize(req: func.HttpRequest, raw_cv: dict, pptx_name: str):
-    if not isinstance(raw_cv, dict):
-        raise RuntimeError("pptxextract returned no structured data")
-    normalize_url = _build_url(req, CVNORMALIZE_PATH, CVNORMALIZE_KEY)
-    s, d, raw = _post_json(normalize_url, {"raw": raw_cv, "pptx_name": pptx_name})
-    logging.info(f"[cvagent] normalize → {s}")
-    if s != 200 or not isinstance(d, dict):
-        msg = (d.get("error") if isinstance(d, dict) else raw)
-        raise RuntimeError(f"cvnormalize failed ({s}): {msg}")
-    return d.get("cv") or d.get("normalized") or d
-
-
-# ==============================================================
-# MAIN HTTP TRIGGER
+# MAIN
 # ==============================================================
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("cvagent triggered")
@@ -270,16 +229,47 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"error": "Invalid JSON"}), status_code=400, mimetype="application/json")
 
     try:
-        # --------- Extract + Normalize (unchanged from your UX) ---------
+        # ---------- Extract + Normalize (ALWAYS SAS) ----------
         if body.get("mode") == "normalize_only":
             pptx_b64 = body.get("pptx_base64")
             pptx_name = body.get("pptx_name") or "resume.pptx"
             if not pptx_b64:
                 return func.HttpResponse(json.dumps({"error": "Missing pptx_base64"}), status_code=400, mimetype="application/json")
-            cv = _extract_then_normalize(req, pptx_b64, pptx_name)
-            return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
 
-        # --------- Export (build HTML → renderpdf_html) ---------
+            # Decode + upload + sign SAS
+            try:
+                pptx_bytes = base64.b64decode(pptx_b64)
+            except Exception as e:
+                return func.HttpResponse(json.dumps({"error": f"Invalid base64: {e}"}), status_code=400, mimetype="application/json")
+
+            ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            blob_name = f"{ts}-{pptx_name}"
+            logging.info(f"[cvagent] Uploading {blob_name} ...")
+            sas_url = _upload_and_sas(pptx_bytes, blob_name)
+            logging.info("[cvagent] SAS ready")
+
+            # Call extractor that requires ppt_blob_sas
+            extract_url = _build_url(req, PPTXEXTRACT_PATH, PPTXEXTRACT_KEY)
+            s, data, raw = _post_json(extract_url, {"ppt_blob_sas": sas_url, "pptx_name": pptx_name})
+            logging.info(f"[cvagent] extract → {s}")
+            if s != 200 or not isinstance(data, dict):
+                msg = (data.get("error") if isinstance(data, dict) else raw)
+                raise RuntimeError(f"pptxextract failed ({s}): {msg}")
+
+            raw_cv = data.get("raw") or data.get("raw3") or data
+
+            # Normalize
+            normalize_url = _build_url(req, CVNORMALIZE_PATH, CVNORMALIZE_KEY)
+            s2, norm, raw2 = _post_json(normalize_url, {"raw": raw_cv, "pptx_name": pptx_name})
+            logging.info(f"[cvagent] normalize → {s2}")
+            if s2 != 200 or not isinstance(norm, dict):
+                msg = (norm.get("error") if isinstance(norm, dict) else raw2)
+                raise RuntimeError(f"cvnormalize failed ({s2}): {msg}")
+
+            normalized = norm.get("cv") or norm.get("normalized") or norm
+            return func.HttpResponse(json.dumps({"cv": normalized}), status_code=200, mimetype="application/json")
+
+        # ---------- Export (HTML → renderpdf_html) ----------
         if "cv" in body:
             cv = body["cv"]
             out_name = body.get("file_name") or body.get("out_name") or "cv.pdf"
@@ -290,7 +280,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             payload = {
                 "out_name": out_name if out_name.lower().endswith(".pdf") else out_name + ".pdf",
                 "html": html,
-                "css": ""  # CSS inlined
+                "css": ""  # inlined
             }
             s3, rjson, rraw = _post_json(render_url, payload)
             logging.info(f"[cvagent] render → {s3}")

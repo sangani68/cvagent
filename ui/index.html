@@ -33,8 +33,8 @@
       <div><label>cvagent route</label><input id="cvagentPath" value="api/cvagent"/></div>
       <div><label>Template</label>
         <select id="templateName">
-          <option value="europass" selected>europass</option>
-          <!-- add more templates later -->
+          <option value="europass" selected>Europass</option>
+          <option value="kyndryl">Kyndryl (Red Sidebar)</option>
         </select>
       </div>
     </div>
@@ -213,8 +213,10 @@ function collectCV(){
   return cv;
 }
 
-/* ---------- template (europass) for preview (client-side only) ---------- */
-function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+/* ---------- templates (client-side preview only) ---------- */
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]))}
+
+/* Europass preview (existing) */
 function tpl_europass(cv){
   const pi=cv.personal_info||{}, full=esc(pi.full_name||""), title=esc(pi.headline||"");
   const addr=[pi.address,pi.city,pi.country].filter(Boolean).join(", ");
@@ -266,8 +268,77 @@ function tpl_europass(cv){
   </div></body></html>`;
 }
 
-/* ---------- preview/export orchestrators ---------- */
-function renderTemplate(name, cv){ switch((name||"europass").toLowerCase()){ case "europass": default: return tpl_europass(cv); } }
+/* NEW: Kyndryl preview (matches server template) */
+function tpl_kyndryl(cv){
+  const pi=cv.personal_info||{};
+  const name=esc(pi.full_name||"");
+  const role=esc(pi.headline||"");
+  const city=esc(pi.city||"");
+  const country=esc(pi.country||"");
+  const summary=esc(cv.summary||pi.summary||"");
+  const languages=(cv.languages||[]).map(l=>`<li>${esc(l.name||l.language||l.lang||'')}${l.level?` — ${esc(l.level)}`:''}</li>`).join("");
+  const skills=(cv.skills_groups||[]).flatMap(g=>g.items||[]).map(s=>`<li>${esc(s)}</li>`).join("");
+  const achievements=(cv.achievements||[]).map(a=>`<li>${esc(a)}</li>`).join("");
+  const certs=(cv.certifications||[]).map(c=>`<li>${esc(c.name||c)}</li>`).join("");
+  const roles=(cv.work_experience||[]).map(e=>{
+    const sd=esc(e.start_date||""); const ed=esc(e.end_date||"");
+    const when=(sd ? ` (${sd}${ed?`–${ed}`:''})` : "");
+    return `<li><strong>${esc(e.title||"")}</strong> — ${esc(e.company||"")}${when}</li>`;
+  }).join("");
+  const edu=(cv.education||[]).map(ed=>`<li>${esc(ed.degree||ed.title||"")} — ${esc(ed.institution||"")}</li>`).join("");
+
+  // If you later capture a base64 photo in personal_info.photo_base64, you can pass it here
+  const photo_b64 = pi.photo_base64 ? `data:image/png;base64,${esc(pi.photo_base64)}` : "";
+
+  return `<!doctype html><html><head><meta charset="utf-8"/>
+  <style>
+    @page { size: A4; margin: 0 }
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#111}
+    table{width:100%;border-spacing:0}
+    h3{color:#FF462D;margin:8px 0 4px;font-size:14px;text-transform:uppercase}
+    h3.white{color:white}
+    ul{margin:6px 0 10px 20px;list-style:none;padding:0}
+    li{margin-bottom:4px}
+    .left{vertical-align:top;width:30%;height:100vh;color:white;background-color:#FF462D;padding:14px;position:relative}
+    .right{vertical-align:top;width:70%;padding:20px 24px}
+    .subtitle{font-size:13px;margin-bottom:8px}
+    .logo{width:110px;margin-top:20px}
+    hr{border:0;border-top:1px solid #FF462D;margin:12px 0}
+  </style></head>
+  <body>
+  <table><tr>
+    <td class="left">
+      <div style="text-align:center;margin:10px 0 14px;">
+        ${photo_b64 ? `<img alt="Profile" src="${photo_b64}" style="width:100px;border-radius:50%;"/>` : ``}
+      </div>
+      <h3 class="white">${name}</h3>
+      ${role?`<div class="subtitle">${role}</div>`:''}
+      ${(city||country)?`<div class="subtitle">${city}${(city && country)?', ':''}${country}</div>`:''}
+      <h3 class="white">LANGUAGES</h3>
+      <ul>${languages}</ul>
+      <div style="position:absolute;bottom:20px;left:14px;text-align:center;width:26%;">
+        <img class="logo" src="https://upload.wikimedia.org/wikipedia/commons/7/73/Kyndryl_logo.svg" alt="Kyndryl Logo"/>
+      </div>
+    </td>
+    <td class="right">
+      ${summary?`<h3>ABOUT ME</h3><p style="font-style:italic">${summary}</p><hr/>`:''}
+      ${roles?`<h3>PREVIOUS ROLES</h3><ul>${roles}</ul>`:''}
+      ${skills?`<h3>SKILLS</h3><ul>${skills}</ul>`:''}
+      ${achievements?`<h3>ACHIEVEMENTS</h3><ul>${achievements}</ul>`:''}
+      ${edu?`<h3>EDUCATION</h3><ul>${edu}</ul>`:''}
+      ${certs?`<h3>CERTIFICATIONS</h3><ul>${certs}</ul>`:''}
+    </td>
+  </tr></table>
+  </body></html>`;
+}
+
+/* preview router */
+function renderTemplate(name, cv){
+  switch((name||"europass").toLowerCase()){
+    case "kyndryl": return tpl_kyndryl(cv);
+    case "europass": default: return tpl_europass(cv);
+  }
+}
 function refreshPreview(){ const html = renderTemplate($("templateName").value, collectCV()); $("preview-frame").srcdoc = html; }
 
 function downloadFromUrlToFile(url, filename){
@@ -318,7 +389,9 @@ $("btnLoadSample").addEventListener('click', ()=>{
     skills_groups:[{group:'Tech', items:['Analysis','Algorithms','Mathematics']}],
     work_experience:[{title:'Analyst', company:'Analytical Engine', start_date:'1842', end_date:'1852', location:'London', bullets:['Translated Menabrea','Conceived loop & subroutine']}],
     education:[{degree:'Mathematics', institution:'Private tutelage', start_date:'1830', end_date:'1840'}],
-    languages:[{name:'English', level:'Native'}]
+    languages:[{name:'English', level:'Native'}],
+    achievements:['Pioneer work on algorithms'],
+    certifications:['Royal Society lectures']
   });
 });
 

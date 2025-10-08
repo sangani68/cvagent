@@ -130,7 +130,7 @@ _EUROPASS_HTML = """<!doctype html>
   @page { size: A4; margin: 10mm }
   body{margin:0;font-family:"DejaVu Sans",Arial,Helvetica,sans-serif;font-size:12px;color:#0f172a}
   .eu-root{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
-  .eu-side{background:#c4122f;border-right:1px solid #e5e7eb;padding:22px}
+  .eu-side{background:#f9423a;border-right:1px solid #e5e7eb;padding:22px}
   .eu-main{padding:22px 26px}
   .eu-name{font-size:26px;font-weight:800;margin:0}
   .eu-title{font-size:13px;color:#475569;margin-top:4px}
@@ -196,7 +196,7 @@ _EUROPASS_HTML = """<!doctype html>
 
 # --- Kyndryl variant (same layout, brand red sidebar, white text; main stays dark on white) ---
 _KYNDRYL_HTML = _EUROPASS_HTML \
-    .replace('#c4122f', '#c4122f') \
+    .replace('#f9423a', '#c4122f') \
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24') \
     .replace('color:#0f172a', 'color:#fff') \
     .replace('background:#fff;', 'background:#fff;color:#0f172a;')

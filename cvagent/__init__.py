@@ -7,24 +7,8 @@ from typing import Dict, Any, Optional
 import azure.functions as func
 import requests
 
-# -------- Optional: use your repo's pipeline if available --------
-# Adjust these imports to your repo structure. They are wrapped to avoid crashing if paths differ.
-EXTRACT_AVAILABLE = False
-NORMALIZE_AVAILABLE = False
 
-try:
-    # Example expected call signatures:
-    #   run_pptx_extract(pptx_bytes: bytes) -> Dict
-    #   run_normalize(extract_result: Dict) -> Dict (normalized CV)
-    from .pipeline.extract import run_pptx_extract       # <-- adjust if needed
-    from .pipeline.normalize import run_normalize         # <-- adjust if needed
-    EXTRACT_AVAILABLE = True
-    NORMALIZE_AVAILABLE = True
-except Exception as e:
-    logging.warning("Pipeline imports not found; falling back to error for normalize_only. Detail: %s", e)
-
-# -------- HTML templates (Europass & Kyndryl) --------
-
+# ---------- Helper functions ----------
 def _esc(s: Optional[str]) -> str:
     if s is None:
         return ""
@@ -33,6 +17,8 @@ def _esc(s: Optional[str]) -> str:
              .replace(">", "&gt;")
              .replace('"', "&quot;"))
 
+
+# ---------- HTML renderer ----------
 def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
     pi = cv.get("personal_info", {}) or {}
     name = _esc(pi.get("full_name", ""))
@@ -140,83 +126,111 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
   </body></html>"""
     return html
 
+
 def render_template(template: str, cv: Dict[str, Any], kyndryl_logo_data: Optional[str]) -> str:
     t = (template or "europass").lower()
     if t == "kyndryl":
         theme = {
-            "sideBg":"#FF462D","sideFg":"#FFFFFF","nameColor":"#FFFFFF","titleColor":"#FFFFFF","hColor":"#FFFFFF",
-            "chipBg":"#FFFFFF","chipFg":"#FF462D","chipBorder":"#FFFFFF",
-            "langLabel":"LANGUAGES","aboutLabel":"ABOUT ME","expLabel":"PREVIOUS ROLES","skillsLabel":"SKILLS","eduLabel":"EDUCATION",
-            "useLogo":True,"logoUrl":"https://upload.wikimedia.org/wikipedia/commons/7/73/Kyndryl_logo.svg",
+            "sideBg": "#FF462D",
+            "sideFg": "#FFFFFF",
+            "nameColor": "#FFFFFF",
+            "titleColor": "#FFFFFF",
+            "hColor": "#FFFFFF",
+            "chipBg": "#FFFFFF",
+            "chipFg": "#FF462D",
+            "chipBorder": "#FFFFFF",
+            "langLabel": "LANGUAGES",
+            "aboutLabel": "ABOUT ME",
+            "expLabel": "PREVIOUS ROLES",
+            "skillsLabel": "SKILLS",
+            "eduLabel": "EDUCATION",
+            "useLogo": True,
+            "logoUrl": "https://upload.wikimedia.org/wikipedia/commons/7/73/Kyndryl_logo.svg",
             "logoData": kyndryl_logo_data or ""
         }
         return _render_euro_like(cv, theme)
     else:
         theme = {
-            "sideBg":"#F8FAFC","sideFg":"#0F172A","nameColor":"#0F172A","titleColor":"#475569","hColor":"#0F172A",
-            "chipBg":"#EEF2FF","chipFg":"#3730A3","chipBorder":"#E0E7FF",
-            "langLabel":"Languages","aboutLabel":"About Me","expLabel":"Work Experience","skillsLabel":"Skills","eduLabel":"Education & Training",
-            "useLogo":False,"logoUrl":""
+            "sideBg": "#F8FAFC",
+            "sideFg": "#0F172A",
+            "nameColor": "#0F172A",
+            "titleColor": "#475569",
+            "hColor": "#0F172A",
+            "chipBg": "#EEF2FF",
+            "chipFg": "#3730A3",
+            "chipBorder": "#E0E7FF",
+            "langLabel": "Languages",
+            "aboutLabel": "About Me",
+            "expLabel": "Work Experience",
+            "skillsLabel": "Skills",
+            "eduLabel": "Education & Training",
+            "useLogo": False,
+            "logoUrl": ""
         }
         return _render_euro_like(cv, theme)
 
-# -------- render forwarding --------
 
+# ---------- Step 1: Normalize via subfunctions ----------
+def normalize_from_pptx_b64(pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
+    """Call pptxextract → cvnormalize via HTTP inside same Function App."""
+    host = os.getenv("WEBSITE_HOSTNAME", "")
+    base = f"https://{host}/api" if host else "/api"
+
+    # ---- Step 1: call pptxextract ----
+    extract_url = f"{base}/pptxextract"
+    extract_payload = {"pptx_base64": pptx_b64, "pptx_name": pptx_name or "input.pptx"}
+
+    try:
+        r1 = requests.post(extract_url, json=extract_payload, timeout=120)
+        if not r1.ok:
+            raise RuntimeError(f"pptxextract failed {r1.status_code}: {r1.text}")
+        extract_data = r1.json()
+    except Exception as e:
+        raise RuntimeError(f"pptxextract call failed: {e}")
+
+    # ---- Step 2: call cvnormalize ----
+    normalize_url = f"{base}/cvnormalize"
+    normalize_payload = {"parsed": extract_data}
+    try:
+        r2 = requests.post(normalize_url, json=normalize_payload, timeout=120)
+        if not r2.ok:
+            raise RuntimeError(f"cvnormalize failed {r2.status_code}: {r2.text}")
+        norm_data = r2.json()
+    except Exception as e:
+        raise RuntimeError(f"cvnormalize call failed: {e}")
+
+    return norm_data.get("cv") or norm_data
+
+
+# ---------- Step 2: Forward to renderpdf_html ----------
 def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
-    """
-    Forward HTML to your internal renderer if configured.
-    Env:
-      RENDERPDF_ENDPOINT: e.g. '/api/renderpdf_html' or full URL
-    """
-    endpoint = os.getenv("RENDERPDF_ENDPOINT", "").strip()
-    if not endpoint:
-        # No renderer configured; return HTML so caller can inspect
-        return {"html": html, "message": "No RENDERPDF_ENDPOINT set; returning HTML instead."}
-
-    # Build absolute URL if needed
+    endpoint = os.getenv("RENDERPDF_ENDPOINT", "/api/renderpdf_html").strip()
+    host = os.getenv("WEBSITE_HOSTNAME", "")
     if endpoint.startswith("/"):
-        host = os.getenv("WEBSITE_HOSTNAME", "").strip()
-        scheme = "https" if host else ""
-        if not host:
-            return {"html": html, "message": "RENDERPDF_ENDPOINT is relative but WEBSITE_HOSTNAME is not set."}
-        url = f"{scheme}://{host}{endpoint}"
+        base = f"https://{host}" if host else ""
+        url = f"{base}{endpoint}"
     else:
         url = endpoint
 
-    payload = {
-        "html": html,
-        "file_name": file_name or "cv.pdf",
-        "return": want or "url"
-    }
+    payload = {"html": html, "file_name": file_name, "return": want or "url"}
+
     try:
-        r = requests.post(url, json=payload, timeout=60)
+        r = requests.post(url, json=payload, timeout=90)
     except Exception as e:
-        logging.exception("Error calling renderer")
         return {"error": f"Downstream error calling renderer: {e}"}
+
     try:
         data = r.json()
     except Exception:
         data = {"raw": r.text}
+
     if not r.ok:
         err = data.get("error") or data.get("message") or f"HTTP {r.status_code}"
-        return {"error": f"Downstream error {r.status_code} calling {endpoint}: {err}"}
+        return {"error": f"Downstream error {r.status_code}: {err}"}
     return data
 
-# -------- normalize from PPTX (using your pipeline when available) --------
 
-def normalize_from_pptx_b64(pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
-    if not EXTRACT_AVAILABLE or not NORMALIZE_AVAILABLE:
-        raise ValueError("normalize_only requested but extract/normalize pipeline not available in this deployment.")
-    try:
-        ppt_bytes = base64.b64decode(pptx_b64, validate=True)
-    except Exception:
-        ppt_bytes = base64.b64decode(pptx_b64)  # fallback
-    extracted = run_pptx_extract(ppt_bytes)   # your repo function
-    normalized = run_normalize(extracted)     # your repo function
-    return normalized
-
-# -------- Azure Function entry --------
-
+# ---------- Azure Function main ----------
 def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
@@ -227,10 +241,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     template = (body.get("template") or "europass").lower().strip()
     want = (body.get("return") or "url").lower().strip()
     file_name = body.get("file_name") or "cv.pdf"
-    kyndryl_logo_data = body.get("kyndryl_logo_data")  # optional data URL
-    logging.info("cvagent: mode=%s template=%s want=%s file_name=%s", mode, template, want, file_name)
+    kyndryl_logo_data = body.get("kyndryl_logo_data")
 
-    # --- 1) Extract + Normalize path ---
+    logging.info("cvagent: mode=%s template=%s want=%s file=%s", mode, template, want, file_name)
+
+    # ---- 1) Extract + Normalize path ----
     if mode == "normalize_only":
         ppt_b64 = body.get("pptx_base64") or body.get("ppt_base64")
         ppt_name = body.get("pptx_name") or body.get("ppt_name")
@@ -243,23 +258,21 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(json.dumps({"error": f"pptxextract/normalize failed: {e}"}), status_code=400, mimetype="application/json")
         return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
 
-    # --- 2) Render path (expects a ready CV JSON) ---
+    # ---- 2) Render path ----
     cv = body.get("cv")
     html = body.get("html")
     if not html:
         if not cv:
-            return func.HttpResponse(json.dumps({"error":"Missing 'cv' (or provide 'html')"}), status_code=400, mimetype="application/json")
+            return func.HttpResponse(json.dumps({"error": "Missing 'cv' (or provide 'html')"}), status_code=400, mimetype="application/json")
         try:
             html = render_template(template, cv, kyndryl_logo_data)
         except Exception as e:
             logging.exception("template render failed")
             return func.HttpResponse(json.dumps({"error": f"Template render failed: {e}"}), status_code=400, mimetype="application/json")
 
-    # If caller wants raw html
     if want == "html":
         return func.HttpResponse(json.dumps({"html": html, "file_name": file_name}), status_code=200, mimetype="application/json")
 
-    # Forward to renderer if configured, else return html
     result = forward_to_renderer(html, file_name, want)
     status = 200 if not result.get("error") else 400
     return func.HttpResponse(json.dumps(result), status_code=status, mimetype="application/json")

@@ -1,11 +1,10 @@
-import os, json, logging, base64
-import io
+import os, json, logging, base64, io
 import requests
 from datetime import datetime, timedelta, timezone
 import azure.functions as func
 from jinja2 import Environment, BaseLoader, select_autoescape
 
-# Azure Blob
+# Azure Blob SDK
 from azure.storage.blob import (
     BlobServiceClient,
     ContentSettings,
@@ -14,13 +13,11 @@ from azure.storage.blob import (
 )
 from azure.storage.blob._shared.base_client import parse_connection_str
 
-
 # ==============================================================
-# --- CONFIGURATION (read from Application Settings)
+# --- CONFIGURATION
 # ==============================================================
 BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
-            or os.environ.get("FUNCS_BASE_URL")  # optional alias
-            or "").rstrip("/")
+            or os.environ.get("FUNCS_BASE_URL") or "").rstrip("/")
 
 PPTXEXTRACT_PATH = os.environ.get("PPTXEXTRACT_PATH", "/api/pptxextract")
 CVNORMALIZE_PATH = os.environ.get("CVNORMALIZE_PATH", "/api/cvnormalize")
@@ -34,20 +31,34 @@ HTTP_TIMEOUT_SEC = int(os.environ.get("HTTP_TIMEOUT_SEC", "180"))
 INCOMING_CONTAINER = os.environ.get("INCOMING_CONTAINER", "incoming")
 SAS_MINUTES = int(os.environ.get("SAS_MINUTES", "120"))
 
-# Azure storage (automatic SAS generation)
+# ==============================================================
+# --- STORAGE INITIALIZATION (with fallback + explicit override)
+# ==============================================================
 CONN_STR = os.environ.get("AzureWebJobsStorage")
 _bsc = BlobServiceClient.from_connection_string(CONN_STR) if CONN_STR else None
+
+STORAGE_ACCOUNT_NAME = None
+STORAGE_ACCOUNT_KEY = None
 
 try:
     if CONN_STR:
         parsed = parse_connection_str(CONN_STR)
-        STORAGE_ACCOUNT_NAME = parsed["account_name"]
-        STORAGE_ACCOUNT_KEY = parsed["account_key"]
-    else:
-        STORAGE_ACCOUNT_NAME = STORAGE_ACCOUNT_KEY = None
-except Exception:
-    STORAGE_ACCOUNT_NAME = STORAGE_ACCOUNT_KEY = None
+        STORAGE_ACCOUNT_NAME = parsed.get("account_name")
+        STORAGE_ACCOUNT_KEY = parsed.get("account_key")
+    # explicit override if defined
+    env_name = os.environ.get("STORAGE_ACCOUNT_NAME")
+    env_key = os.environ.get("STORAGE_ACCOUNT_KEY")
+    if env_name and env_key:
+        STORAGE_ACCOUNT_NAME = env_name
+        STORAGE_ACCOUNT_KEY = env_key
 
+    if not STORAGE_ACCOUNT_NAME or not STORAGE_ACCOUNT_KEY:
+        raise RuntimeError("Missing storage credentials in environment")
+
+    logging.info(f"[cvagent] Using storage account: {STORAGE_ACCOUNT_NAME}")
+except Exception as e:
+    logging.error(f"[cvagent] Storage credential parse failed: {e}")
+    STORAGE_ACCOUNT_NAME = STORAGE_ACCOUNT_KEY = None
 
 # ==============================================================
 # --- HELPERS
@@ -118,7 +129,9 @@ def _upload_pptx_and_get_sas(pptx_bytes: bytes, blob_name: str) -> str:
         expiry=datetime.now(timezone.utc) + timedelta(minutes=SAS_MINUTES),
     )
 
-    return f"{blob_url}?{sas}"
+    signed = f"{blob_url}?{sas}"
+    logging.info(f"[cvagent] Blob SAS generated: {signed[:80]}...")
+    return signed
 
 
 # ==============================================================
@@ -234,12 +247,12 @@ def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     }
     return j.render(**model)
 
-
 # ==============================================================
 # --- MAIN FUNCTION
 # ==============================================================
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("cvagent triggered")
+
     try:
         body = req.get_json()
     except Exception:

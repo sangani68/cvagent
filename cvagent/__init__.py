@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 import azure.functions as func
 import requests
 
-# Azure Blob
+# Azure Blob SDK
 from azure.storage.blob import (
     BlobServiceClient,
     ContentSettings,
@@ -17,7 +17,9 @@ from azure.storage.blob import (
 )
 
 
-# ---------- Small utils ----------
+# ========================
+# Utilities
+# ========================
 def _esc(s: Optional[str]) -> str:
     if s is None:
         return ""
@@ -26,7 +28,6 @@ def _esc(s: Optional[str]) -> str:
              .replace(">", "&gt;")
              .replace('"', "&quot;"))
 
-
 def _get_env(*keys: str, default: Optional[str] = None) -> Optional[str]:
     for k in keys:
         v = os.getenv(k)
@@ -34,9 +35,8 @@ def _get_env(*keys: str, default: Optional[str] = None) -> Optional[str]:
             return v
     return default
 
-
 def _get_downstream_code(req: func.HttpRequest) -> Optional[str]:
-    """Function key to forward to pptxextract/cvnormalize."""
+    # prefer query param, then header, then env var
     code = req.params.get("code")
     if code:
         return code
@@ -45,7 +45,6 @@ def _get_downstream_code(req: func.HttpRequest) -> Optional[str]:
         return hdr
     return _get_env("DOWNSTREAM_FUNCTION_CODE", default=None)
 
-
 def _abs_api_url(path: str) -> str:
     p = path if path.startswith("/") else "/" + path
     host = os.getenv("WEBSITE_HOSTNAME", "").strip()
@@ -53,24 +52,33 @@ def _abs_api_url(path: str) -> str:
         return f"https://{host}{p}"
     return p
 
-
 def _post_json(url: str, payload: Dict[str, Any], code: Optional[str], timeout: int = 180) -> Dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     if code:
         headers["x-functions-key"] = code
         url = url + ("&" if "?" in url else "?") + f"code={code}"
     r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    text = r.text
     try:
         data = r.json()
     except Exception:
-        data = {"raw": r.text}
+        data = {"raw": text}
     if not r.ok:
-        msg = data.get("error") or data.get("message") or r.text or f"HTTP {r.status_code}"
+        msg = data.get("error") or data.get("message") or text or f"HTTP {r.status_code}"
         raise RuntimeError(f"{url} failed {r.status_code}: {msg}")
     return data
 
+def _safe_b64decode(data_b64: str) -> bytes:
+    s = data_b64.strip()
+    if "," in s and s.lower().startswith("data:"):
+        s = s.split(",", 1)[1]
+    import base64
+    return base64.b64decode(s)
 
-# ---------- Storage helpers (upload PPTX → SAS) ----------
+
+# ========================
+# Storage helpers (upload → SAS)
+# ========================
 def _get_blob_service_client() -> BlobServiceClient:
     account = _get_env("AZURE_STORAGE_ACCOUNT", "STORAGE_ACCOUNT_NAME")
     key = _get_env("AZURE_STORAGE_KEY", "STORAGE_ACCOUNT_KEY")
@@ -79,16 +87,13 @@ def _get_blob_service_client() -> BlobServiceClient:
     conn = f"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={key};EndpointSuffix=core.windows.net"
     return BlobServiceClient.from_connection_string(conn)
 
-
 def _ensure_container(bsc: BlobServiceClient, container: str) -> None:
     try:
         bsc.create_container(name=container, public_access=PublicAccess.NONE)
     except Exception as e:
-        # If it already exists, ignore; otherwise rethrow
-        msg = str(e).lower()
-        if "containeralreadyexists" not in msg:
-            raise
-
+        if "ContainerAlreadyExists" not in str(e):
+            # container exists: fine; else: bubble up
+            pass
 
 def _upload_pptx_and_get_sas(pptx_b64: str, blob_name: str) -> str:
     container = _get_env("STORAGE_CONTAINER_INCOMING", default="incoming")
@@ -102,16 +107,14 @@ def _upload_pptx_and_get_sas(pptx_b64: str, blob_name: str) -> str:
     _ensure_container(bsc, container)
 
     blob_client = bsc.get_blob_client(container=container, blob=blob_name)
-    pptx_bytes = None
     try:
         pptx_bytes = _safe_b64decode(pptx_b64)
     except Exception:
-        raise RuntimeError("Invalid base64 PPTX payload. Ensure you're sending base64 data only (no data: prefix).")
+        raise RuntimeError("Invalid base64 for PPTX. Send clean base64 (no data: prefix).")
 
     content = ContentSettings(content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
     blob_client.upload_blob(pptx_bytes, overwrite=True, content_settings=content)
 
-    # Build SAS for read access
     sas = generate_blob_sas(
         account_name=account,
         container_name=container,
@@ -124,16 +127,9 @@ def _upload_pptx_and_get_sas(pptx_b64: str, blob_name: str) -> str:
     return sas_url
 
 
-def _safe_b64decode(data_b64: str) -> bytes:
-    s = data_b64.strip()
-    # Strip data URL prefix if present
-    if "," in s and s.lower().startswith("data:"):
-        s = s.split(",", 1)[1]
-    import base64
-    return base64.b64decode(s)
-
-
-# ---------- HTML renderer (Skills on LEFT column) ----------
+# ========================
+# HTML templates (skills in LEFT column)
+# ========================
 def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
     pi = cv.get("personal_info", {}) or {}
     name = _esc(pi.get("full_name", ""))
@@ -149,7 +145,7 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
         lvl = l.get("level") or ""
         lang_items.append(_esc(" — ".join([x for x in [nm, lvl] if x])))
 
-    # Skills (LEFT as requested)
+    # Skills (left)
     skills_groups = cv.get("skills_groups") or []
     flat_skills = []
     for g in skills_groups:
@@ -161,7 +157,6 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
 
     # Experience (right)
     exps = cv.get("work_experience") or []
-    exp_html = ""
     parts = []
     for e in exps:
         dates = _esc(f'{e.get("start_date","")} – {e.get("end_date","Present")}')
@@ -175,8 +170,7 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
                 {f'<ul>{bhtml}</ul>' if bhtml else ""}
             </div>'''
         )
-    if parts:
-        exp_html = f'<div class="sec"><h2>{theme["expLabel"]}</h2>{"".join(parts)}</div>'
+    exp_html = f'<div class="sec"><h2>{theme["expLabel"]}</h2>{"".join(parts)}</div>' if parts else ""
 
     # Education (right)
     edus = cv.get("education") or []
@@ -243,7 +237,6 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
   </body></html>"""
     return html
 
-
 def render_template(template: str, cv: Dict[str, Any], kyndryl_logo_data: Optional[str]) -> str:
     t = (template or "europass").lower()
     if t == "kyndryl":
@@ -287,33 +280,33 @@ def render_template(template: str, cv: Dict[str, Any], kyndryl_logo_data: Option
         return _render_euro_like(cv, theme)
 
 
-# ---------- Normalization orchestration ----------
+# ========================
+# Orchestration: upload → pptxextract → cvnormalize
+# ========================
 def normalize_from_pptx_b64(req: func.HttpRequest, pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
-    """
-    Upload PPTX → SAS → /api/pptxextract → /api/cvnormalize
-    """
     code = _get_downstream_code(req)
-    # 1) Upload PPTX to Blob, get SAS URL
+    # 1) upload
     safe_name = (pptx_name or "input.pptx").replace("\\", "/").split("/")[-1]
-    # Make upload name unique-ish
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    blob_name = f"{ts}-{safe_name}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    blob_name = f"{stamp}-{safe_name}"
     sas_url = _upload_pptx_and_get_sas(pptx_b64, blob_name)
 
-    # 2) Call pptxextract with SAS (as your deployment expects)
+    # 2) extract
     extract_url = _abs_api_url("/api/pptxextract")
     extract_payload = {"ppt_blob_sas": sas_url, "ppt_name": safe_name}
-    extract_data = _post_json(extract_url, extract_payload, code, timeout=180)
+    extract_res = _post_json(extract_url, extract_payload, code, timeout=180)
 
-    # 3) Call cvnormalize
+    # 3) normalize
     normalize_url = _abs_api_url("/api/cvnormalize")
-    normalize_payload = {"parsed": extract_data}
-    norm_data = _post_json(normalize_url, normalize_payload, code, timeout=180)
+    normalize_payload = {"parsed": extract_res}
+    norm_res = _post_json(normalize_url, normalize_payload, code, timeout=180)
 
-    return norm_data.get("cv") or norm_data
+    return norm_res.get("cv") or norm_res
 
 
-# ---------- Forward to PDF renderer ----------
+# ========================
+# Render → PDF
+# ========================
 def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
     endpoint = os.getenv("RENDERPDF_ENDPOINT", "/api/renderpdf_html").strip()
     url = _abs_api_url(endpoint)
@@ -324,20 +317,23 @@ def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=90)
     except Exception as e:
-        return {"error": f"Downstream error calling renderer: {e}"}
+        return {"error": f"Downstream error calling renderer: {e!r}"}
 
+    text = r.text
     try:
         data = r.json()
     except Exception:
-        data = {"raw": r.text}
+        data = {"raw": text}
 
     if not r.ok:
-        err = data.get("error") or data.get("message") or f"HTTP {r.status_code}"
+        err = data.get("error") or data.get("message") or text or f"HTTP {r.status_code}"
         return {"error": f"Downstream error {r.status_code}: {err}"}
     return data
 
 
-# ---------- Azure Function entry ----------
+# ========================
+# Azure Function entry
+# ========================
 def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
@@ -352,7 +348,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     logging.info("cvagent: mode=%s template=%s want=%s file=%s", mode, template, want, file_name)
 
-    # ---- Extract + Normalize ----
+    # 1) extract + normalize
     if mode == "normalize_only":
         ppt_b64 = body.get("pptx_base64") or body.get("ppt_base64")
         ppt_name = body.get("pptx_name") or body.get("ppt_name")
@@ -362,10 +358,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             cv = normalize_from_pptx_b64(req, ppt_b64, ppt_name)
         except Exception as e:
             logging.exception("normalize_only failed")
-            return func.HttpResponse(json.dumps({"error": f"pptxextract/normalize failed: {e}"}), status_code=400, mimetype="application/json")
+            # return a verbose message so you never see "NONE"
+            return func.HttpResponse(json.dumps({"error": f"pptxextract/normalize failed: {e!r}"}), status_code=400, mimetype="application/json")
         return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
 
-    # ---- Render path ----
+    # 2) render from CV or direct HTML
     cv = body.get("cv")
     html = body.get("html")
     if not html:
@@ -375,7 +372,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             html = render_template(template, cv, kyndryl_logo_data)
         except Exception as e:
             logging.exception("template render failed")
-            return func.HttpResponse(json.dumps({"error": f"Template render failed: {e}"}), status_code=400, mimetype="application/json")
+            return func.HttpResponse(json.dumps({"error": f"Template render failed: {e!r}"}), status_code=400, mimetype="application/json")
 
     if want == "html":
         return func.HttpResponse(json.dumps({"html": html, "file_name": file_name}), status_code=200, mimetype="application/json")

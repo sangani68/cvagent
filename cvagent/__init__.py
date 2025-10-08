@@ -124,18 +124,19 @@ def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
 # TEMPLATE (EUROPASS → HTML)
 # ==============================================================
 
-# --- Kyndryl variant (red sidebar, white text in second column) ---
+# --- Kyndryl variant (updated colors for PDF export) ---
 _KYNDRYL_HTML = _EUROPASS_HTML \
-    .replace('#f8fafc', '#c4122f')  # Sidebar background red
+    .replace('#f8fafc', '#c4122f')  # Sidebar background Kyndryl red
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24')  # Sidebar border
-    .replace('background:#fff;color:#0f172a', 'background:#fff;color:#0f172a')  # Main column dark text on white
+    .replace('background:#fff;color:#0f172a', 'background:#fff;color:#0f172a')  # Main column text color stays black
 
 _KYNDRYL_HTML = _KYNDRYL_HTML.replace('</style>', r'''
-  /* Kyndryl sidebar styling for logo */
+  /* Kyndryl styling for sidebar (red), main column text (black) */
   .kynd-logo{margin:0 0 14px 0; display:flex; align-items:center; gap:10px}
   .kynd-logo svg{height:18px; width:auto; fill:#fff}
   .eu-side, .eu-side h2, .eu-side .eu-title, .eu-side .eu-name{color:#fff}
   .eu-side .ico{background:rgba(255,255,255,.18);color:#fff}
+  .eu-chip{display:inline-block;background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}
 </style>''')
 _EUROPASS_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"/>
@@ -208,17 +209,9 @@ _EUROPASS_HTML = """<!doctype html>
 </body></html>
 """
 
-# --- Kyndryl variant (same layout, brand red sidebar, white text; main stays dark on white) ---
-_KYNDRYL_HTML = _EUROPASS_HTML \
-    .replace('#f8fafc', '#c4122f') \
-    .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24') \
-    .replace('color:#0f172a', 'color:#fff') \
-    .replace('background:#fff;', 'background:#fff;color:#0f172a;')
-
-
 def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     env = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))
-    j = env.from_string(_KYNDRYL_HTML if (template_name or "europass").lower() == "kyndryl" else _EUROPASS_HTML)
+    j = env.from_string(_EUROPASS_HTML)
     pi = (cv.get("personal_info") or cv.get("personal") or {}) if isinstance(cv, dict) else {}
     contacts = []
     def add(icon, val):

@@ -1,6 +1,5 @@
 import os
 import json
-import base64
 import logging
 from typing import Dict, Any, Optional
 
@@ -8,7 +7,7 @@ import azure.functions as func
 import requests
 
 
-# ---------- Helper functions ----------
+# ---------- Helpers ----------
 def _esc(s: Optional[str]) -> str:
     if s is None:
         return ""
@@ -18,7 +17,38 @@ def _esc(s: Optional[str]) -> str:
              .replace('"', "&quot;"))
 
 
-# ---------- HTML renderer ----------
+def _get_downstream_code(req: func.HttpRequest) -> Optional[str]:
+    """
+    Get a function key to forward to downstream functions (pptxextract, cvnormalize).
+    Priority:
+      1) caller's ?code=... query
+      2) caller's x-functions-key header
+      3) env DOWNSTREAM_FUNCTION_CODE
+    """
+    code = req.params.get("code")
+    if code:
+        return code
+    hdr = req.headers.get("x-functions-key")
+    if hdr:
+        return hdr
+    env_code = os.getenv("DOWNSTREAM_FUNCTION_CODE", "").strip()
+    return env_code or None
+
+
+def _abs_api_url(path: str) -> str:
+    """
+    Build an absolute URL to a sibling function within the same Function App.
+    Accepts '/api/xyz' or 'api/xyz' and returns 'https://<WEBSITE_HOSTNAME>/api/xyz' if available,
+    else returns the relative path (for local dev / same-site calls).
+    """
+    p = path if path.startswith("/") else "/" + path
+    host = os.getenv("WEBSITE_HOSTNAME", "").strip()
+    if host:
+        return f"https://{host}{p}"
+    return p
+
+
+# ---------- HTML renderer (Skills on LEFT column) ----------
 def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
     pi = cv.get("personal_info", {}) or {}
     name = _esc(pi.get("full_name", ""))
@@ -26,6 +56,7 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
     location = _esc(", ".join([x for x in [pi.get("city"), pi.get("country")] if x]))
     summary = _esc(cv.get("summary") or pi.get("summary") or "")
 
+    # Languages (left)
     langs = cv.get("languages") or []
     lang_items = []
     for l in langs:
@@ -33,17 +64,19 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
         lvl = l.get("level") or ""
         lang_items.append(_esc(" — ".join([x for x in [nm, lvl] if x])))
 
-    skills_html = ""
+    # Skills (LEFT as requested)
     skills_groups = cv.get("skills_groups") or []
     flat_skills = []
     for g in skills_groups:
         flat_skills.extend(g.get("items") or [])
+    skills_left = ""
     if flat_skills:
         chips = "".join(f'<span class="chip">{_esc(s)}</span>' for s in flat_skills)
-        skills_html = f'<div class="sec"><h2>{theme["skillsLabel"]}</h2><div>{chips}</div></div>'
+        skills_left = f'<div class="sec"><h2>{theme["skillsLabel"]}</h2><div>{chips}</div></div>'
 
-    exp_html = ""
+    # Experience (right)
     exps = cv.get("work_experience") or []
+    exp_html = ""
     parts = []
     for e in exps:
         dates = _esc(f'{e.get("start_date","")} – {e.get("end_date","Present")}')
@@ -60,7 +93,7 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
     if parts:
         exp_html = f'<div class="sec"><h2>{theme["expLabel"]}</h2>{"".join(parts)}</div>'
 
-    edu_html = ""
+    # Education (right)
     edus = cv.get("education") or []
     edparts = []
     for ed in edus:
@@ -72,8 +105,7 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
                 {f'<div style="margin-top:6px">{_esc(ed.get("details",""))}</div>' if ed.get("details") else ""}
             </div>'''
         )
-    if edparts:
-        edu_html = f'<div class="sec"><h2>{theme["eduLabel"]}</h2>{"".join(edparts)}</div>'
+    edu_html = f'<div class="sec"><h2>{theme["eduLabel"]}</h2>{"".join(edparts)}</div>' if edparts else ""
 
     photo_b64 = pi.get("photo_base64")
     photo_tag = f'<div style="text-align:center;margin-bottom:10px"><img class="photo" src="data:image/png;base64,{_esc(photo_b64)}" alt="Profile"/></div>' if photo_b64 else ""
@@ -113,13 +145,13 @@ def _render_euro_like(cv: Dict[str, Any], theme: Dict[str, str]) -> str:
       <h1>{name}</h1>
       {f'<div class="sub">{role}</div>' if role else ""}
       {f'<div class="sub" style="margin-top:0">{location}</div>' if location else ""}
+      {skills_left}
       {lang_block}
       {logo_tag}
     </td>
     <td class="main">
       {about_block}
       {exp_html}
-      {skills_html}
       {edu_html}
     </td>
   </tr></table>
@@ -170,52 +202,59 @@ def render_template(template: str, cv: Dict[str, Any], kyndryl_logo_data: Option
         return _render_euro_like(cv, theme)
 
 
-# ---------- Step 1: Normalize via subfunctions ----------
-def normalize_from_pptx_b64(pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
-    """Call pptxextract → cvnormalize via HTTP inside same Function App."""
-    host = os.getenv("WEBSITE_HOSTNAME", "")
-    base = f"https://{host}/api" if host else "/api"
+# ---------- Normalize via sibling functions (with key forwarding) ----------
+def _post_json(url: str, payload: Dict[str, Any], code: Optional[str], timeout: int = 120) -> Dict[str, Any]:
+    if code:
+        # Prefer header for security; also add ?code=... to support both
+        if "?" in url:
+            url += f"&code={code}"
+        else:
+            url += f"?code={code}"
+        headers = {"Content-Type": "application/json", "x-functions-key": code}
+    else:
+        headers = {"Content-Type": "application/json"}
+    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    try:
+        data = r.json()
+    except Exception:
+        data = {"raw": r.text}
+    if not r.ok:
+        msg = data.get("error") or data.get("message") or r.text or f"HTTP {r.status_code}"
+        raise RuntimeError(f"{url} failed {r.status_code}: {msg}")
+    return data
 
-    # ---- Step 1: call pptxextract ----
-    extract_url = f"{base}/pptxextract"
+
+def normalize_from_pptx_b64(req: func.HttpRequest, pptx_b64: str, pptx_name: Optional[str]) -> Dict[str, Any]:
+    """
+    Orchestrates:
+      /api/pptxextract  (POST { pptx_base64, pptx_name })
+      /api/cvnormalize  (POST { parsed })
+    Forwards a function key when required to avoid 401.
+    """
+    code = _get_downstream_code(req)
+    base_extract = _abs_api_url("/api/pptxextract")
+    base_norm = _abs_api_url("/api/cvnormalize")
+
     extract_payload = {"pptx_base64": pptx_b64, "pptx_name": pptx_name or "input.pptx"}
+    extract_data = _post_json(base_extract, extract_payload, code, timeout=180)
 
-    try:
-        r1 = requests.post(extract_url, json=extract_payload, timeout=120)
-        if not r1.ok:
-            raise RuntimeError(f"pptxextract failed {r1.status_code}: {r1.text}")
-        extract_data = r1.json()
-    except Exception as e:
-        raise RuntimeError(f"pptxextract call failed: {e}")
-
-    # ---- Step 2: call cvnormalize ----
-    normalize_url = f"{base}/cvnormalize"
     normalize_payload = {"parsed": extract_data}
-    try:
-        r2 = requests.post(normalize_url, json=normalize_payload, timeout=120)
-        if not r2.ok:
-            raise RuntimeError(f"cvnormalize failed {r2.status_code}: {r2.text}")
-        norm_data = r2.json()
-    except Exception as e:
-        raise RuntimeError(f"cvnormalize call failed: {e}")
+    norm_data = _post_json(base_norm, normalize_payload, code, timeout=180)
 
+    # Most normalizers return {"cv": {...}}; accept plain dict too
     return norm_data.get("cv") or norm_data
 
 
-# ---------- Step 2: Forward to renderpdf_html ----------
+# ---------- Forward to HTML→PDF renderer ----------
 def forward_to_renderer(html: str, file_name: str, want: str) -> Dict[str, Any]:
     endpoint = os.getenv("RENDERPDF_ENDPOINT", "/api/renderpdf_html").strip()
-    host = os.getenv("WEBSITE_HOSTNAME", "")
-    if endpoint.startswith("/"):
-        base = f"https://{host}" if host else ""
-        url = f"{base}{endpoint}"
-    else:
-        url = endpoint
+    url = _abs_api_url(endpoint)
 
-    payload = {"html": html, "file_name": file_name, "return": want or "url"}
+    payload = {"html": html, "file_name": file_name or "cv.pdf", "return": want or "url"}
+    headers = {"Content-Type": "application/json"}
 
     try:
-        r = requests.post(url, json=payload, timeout=90)
+        r = requests.post(url, json=payload, headers=headers, timeout=90)
     except Exception as e:
         return {"error": f"Downstream error calling renderer: {e}"}
 
@@ -245,20 +284,20 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     logging.info("cvagent: mode=%s template=%s want=%s file=%s", mode, template, want, file_name)
 
-    # ---- 1) Extract + Normalize path ----
+    # ---- 1) Extract + Normalize ----
     if mode == "normalize_only":
         ppt_b64 = body.get("pptx_base64") or body.get("ppt_base64")
         ppt_name = body.get("pptx_name") or body.get("ppt_name")
         if not ppt_b64:
             return func.HttpResponse(json.dumps({"error": "Missing 'pptx_base64'"}), status_code=400, mimetype="application/json")
         try:
-            cv = normalize_from_pptx_b64(ppt_b64, ppt_name)
+            cv = normalize_from_pptx_b64(req, ppt_b64, ppt_name)
         except Exception as e:
             logging.exception("normalize_only failed")
             return func.HttpResponse(json.dumps({"error": f"pptxextract/normalize failed: {e}"}), status_code=400, mimetype="application/json")
         return func.HttpResponse(json.dumps({"cv": cv}), status_code=200, mimetype="application/json")
 
-    # ---- 2) Render path ----
+    # ---- 2) Render from CV / HTML ----
     cv = body.get("cv")
     html = body.get("html")
     if not html:
@@ -270,9 +309,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logging.exception("template render failed")
             return func.HttpResponse(json.dumps({"error": f"Template render failed: {e}"}), status_code=400, mimetype="application/json")
 
+    # Return raw HTML for debug if requested
     if want == "html":
         return func.HttpResponse(json.dumps({"html": html, "file_name": file_name}), status_code=200, mimetype="application/json")
 
+    # Forward to renderer
     result = forward_to_renderer(html, file_name, want)
     status = 200 if not result.get("error") else 400
     return func.HttpResponse(json.dumps(result), status_code=status, mimetype="application/json")

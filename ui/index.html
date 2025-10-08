@@ -1,190 +1,363 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>CV Agent</title>
-  <style>
-    body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:20px;line-height:1.4}
-    .card{max-width:920px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:18px;box-shadow:0 2px 10px rgba(0,0,0,.04)}
-    h1{margin:0 0 12px}
-    label{display:block;margin:10px 0 6px;font-weight:600}
-    input[type=file],select,button,textarea{font:inherit}
-    input[type=file],select,button{padding:8px 10px}
-    button{border:1px solid #111827;border-radius:8px;background:#111827;color:#fff;cursor:pointer}
-    button.secondary{background:#fff;color:#111827}
-    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-    .muted{color:#6b7280}
-    textarea{width:100%;min-height:200px;border:1px solid #e5e7eb;border-radius:8px;padding:10px}
-    .kv{display:grid;grid-template-columns:180px 1fr;gap:8px;align-items:center}
-    .mt12{margin-top:12px}
-    .mt20{margin-top:20px}
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CV Agent — Extract • Edit • Export</title>
+<style>
+  :root{ --brand:#0F62FE; --ink:#0f172a; --muted:#64748b; --line:#e5e7eb; --bg:#fff; --side:#f8fafc; }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial}
+  .wrap{max-width:1140px;margin:28px auto 80px;padding:0 16px} h1{font-size:22px;margin:0 0 8px} p{margin:0 0 12px;color:var(--muted)}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font:inherit}
+  textarea{min-height:90px} .btn{appearance:none;border:0;background:var(--brand);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
+  .btn.secondary{background:#1118270d;color:#111827} .btn:disabled{opacity:.6;cursor:not-allowed} .toolbar{display:flex;flex-wrap:wrap;gap:8px}
+  .list{display:grid;gap:12px} .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
+  .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap}
+  #preview-frame{width:100%;height:900px;border:1px solid var(--line);border-radius:12px}
+</style>
 </head>
 <body>
+<div class="wrap">
+  <h1>CV Agent</h1>
+  <p>Upload PPTX → extract & normalize → edit → export a pixel-perfect PDF.</p>
+
+  <!-- Settings -->
   <div class="card">
-    <h1>CV Agent</h1>
-
-    <div class="kv">
-      <label for="pptx">Source PPTX</label>
-      <input id="pptx" type="file" accept=".ppt,.pptx"/>
-      <div></div>
-      <div class="muted">We’ll extract & normalize from your PPTX.</div>
+    <div class="row">
+      <div><label>Function App Base URL</label><input id="baseUrl" value="/"/></div>
+      <div><label>Host/Function Key (if required)</label><input id="funcKey" placeholder="paste key if authLevel=function"/></div>
     </div>
-
-    <div class="kv mt12">
-      <label for="templateName">Template</label>
-      <select id="templateName">
-        <option value="europass" selected>Europass (2-column)</option>
-        <option value="kyndryl">Kyndryl (red sidebar)</option>
-      </select>
-      <div></div>
-      <div class="muted">Kyndryl uses the same layout with red left column & white text.</div>
+    <div class="row" style="margin-top:8px">
+      <div><label>cvagent route</label><input id="cvagentPath" value="api/cvagent"/></div>
+      <div><label>Template</label>
+        <select id="templateName">
+          <option value="europass" selected>europass</option>
+          <!-- add more templates later -->
+          <option value="kyndryl">Kyndryl (red sidebar)</option><!-- << added -->
+        </select>
+      </div>
     </div>
-
-    <div class="row mt12">
-      <button id="btn-normalize">1) Extract & Normalize</button>
-      <button id="btn-export" class="secondary" disabled>2) Export PDF</button>
-    </div>
-
-    <div class="mt20">
-      <label>Normalized CV (preview / editable)</label>
-      <textarea id="cv-json" spellcheck="false" placeholder='Normalized CV JSON will appear here...'></textarea>
-    </div>
-
-    <div class="mt12">
-      <div>Output: <span id="out-link" class="muted">—</span></div>
-    </div>
-
-    <div id="preview" class="mt20" style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;min-height:300px;overflow:auto"></div>
+    <p style="color:#64748b;margin-top:8px">Same origin → keep Base URL “/”. If hosted elsewhere, use your Function URL with trailing slash.</p>
   </div>
 
-  <script>
-  const $ = (s) => document.querySelector(s);
-  const $pptx = $("#pptx");
-  const $tpl  = $("#templateName");
-  const $btnN = $("#btn-normalize");
-  const $btnE = $("#btn-export");
-  const $txt  = $("#cv-json");
-  const $out  = $("#out-link");
-  const $prev = $("#preview");
+  <!-- Step 1 -->
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:8px">1) Upload PPTX and extract</div>
+    <div class="row">
+      <div>
+        <label>Select PPTX</label>
+        <input type="file" id="pptxFile" accept=".pptx,.ppt,.ppsx,.potx,.potm,.pptm,.odp"/>
+      </div>
+      <div>
+        <label>Output PDF file name</label>
+        <input id="outName" value="cv-from-pptx.pdf"/>
+      </div>
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn" id="btnExtract">Extract → Normalize</button>
+      <button class="btn secondary" id="btnLoadSample" type="button">Load sample CV</button>
+    </div>
+    <div id="extractLog" class="log" style="margin-top:10px;display:none"></div>
+  </div>
 
-  let sourceName = null;
+  <!-- Step 2 -->
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:8px">2) Review & edit CV fields</div>
+    <div class="row">
+      <div><label>Full name</label><input id="pi_full_name"/></div>
+      <div><label>Headline</label><input id="pi_headline"/></div>
+    </div>
+    <div class="row">
+      <div><label>Address</label><input id="pi_address"/></div>
+      <div><label>City</label><input id="pi_city"/></div>
+    </div>
+    <div class="row">
+      <div><label>Country</label><input id="pi_country"/></div>
+      <div><label>Email</label><input id="pi_email"/></div>
+    </div>
+    <div class="row">
+      <div><label>Phone</label><input id="pi_phone"/></div>
+      <div><label>Website</label><input id="pi_website"/></div>
+    </div>
+    <div class="row">
+      <div><label>LinkedIn</label><input id="pi_linkedin"/></div>
+      <div><label>Nationality</label><input id="pi_nationality"/></div>
+    </div>
+    <div class="row">
+      <div><label>Date of Birth</label><input id="pi_dob"/></div>
+      <div><label>Gender</label><input id="pi_gender"/></div>
+    </div>
 
-  function toBase64(file){
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result.split(",")[1]);
-      r.onerror = reject;
-      r.readAsDataURL(file);
-    });
+    <div style="font-weight:700;margin-top:14px">Summary / About</div>
+    <textarea id="cv_summary"></textarea>
+
+    <div style="font-weight:700;margin-top:14px">Skills groups <span style="color:#64748b">(comma-separated items)</span></div>
+    <div id="skillsList" class="list"></div>
+    <div class="toolbar"><button class="btn secondary" type="button" id="addSkillGrp">+ Add group</button></div>
+
+    <div style="font-weight:700;margin-top:14px">Work experience</div>
+    <div id="workList" class="list"></div>
+    <div class="toolbar"><button class="btn secondary" type="button" id="addJob">+ Add job</button></div>
+
+    <div style="font-weight:700;margin-top:14px">Education</div>
+    <div id="eduList" class="list"></div>
+    <div class="toolbar"><button class="btn secondary" type="button" id="addEdu">+ Add education</button></div>
+
+    <div style="font-weight:700;margin-top:14px">Languages</div>
+    <div id="langList" class="list"></div>
+    <div class="toolbar"><button class="btn secondary" type="button" id="addLang">+ Add language</button></div>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:8px">3) Preview (selected template)</div>
+    <iframe id="preview-frame"></iframe>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn secondary" id="btnRefreshPreview" type="button">Refresh preview</button>
+    </div>
+  </div>
+
+  <!-- Step 4 -->
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:8px">4) Export PDF</div>
+    <div class="toolbar">
+      <button class="btn" id="btnExport">Export PDF</button>
+      <div id="exportStatus" style="margin-left:8px;color:#64748b"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+      <div>
+        <div style="color:#64748b">Blob link</div>
+        <div id="blobLink" style="margin-top:8px"></div>
+      </div>
+      <div style="text-align:right">
+        <div style="color:#64748b">Local download</div>
+        <div id="localLink" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:8px">Logs</div>
+    <pre class="log" id="log"></pre>
+  </div>
+</div>
+
+<script>
+/* ---------- helpers ---------- */
+const $ = id => document.getElementById(id);
+const jsonHeaders = () => ({ "Content-Type": "application/json" });
+const EXT_RE = /\.(pptx|pptm|ppt|ppsx|potx|potm|odp)$/i;
+const toPdfName = n => (n || 'cv').replace(EXT_RE,'').replace(/\.+$/,'') + '.pdf';
+
+const logEl = $("log");
+const xlog = (...args) => { logEl.textContent += args.map(a => typeof a==='string'? a : JSON.stringify(a,null,2)).join(' ') + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+
+function buildBase(){ const v = $("baseUrl").value.trim() || "/"; return v.endsWith("/") ? v : v + "/"; }
+function withKey(url){ const key = $("funcKey").value.trim(); return key ? url + (url.includes("?")?"&":"?") + "code=" + encodeURIComponent(key) : url; }
+function cvagentUrl(){ const route = ($("cvagentPath").value || "api/cvagent").replace(/^\/+/, ""); return withKey(buildBase() + route); }
+
+/* ---------- UI builders ---------- */
+function el(tag, attrs={}, ...children){
+  const e=document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs)){ if(k==="class") e.className=v; else if(k==="value") e.value=v; else e.setAttribute(k,v); }
+  for(const c of children){ if(typeof c==="string") e.appendChild(document.createTextNode(c)); else if(c) e.appendChild(c); }
+  return e;
+}
+function skillsItem(grp={group:"", items:[]}){ const w=el('div',{class:'item'});
+  const g=el('input',{value:grp.group||'',placeholder:'Group (e.g., Tech)'}); const it=el('input',{value:(grp.items||[]).join(', '),placeholder:'Items (comma separated)'});
+  w.append(el('label',{},'Group'),g,el('label',{},'Items'),it); w._get=()=>({group:g.value.trim(),items:it.value.split(',').map(s=>s.trim()).filter(Boolean)}); return w; }
+function jobItem(j={}){ const w=el('div',{class:'item'}),t=el('input',{value:j.title||'',placeholder:'Title'}),c=el('input',{value:j.company||'',placeholder:'Company'}),l=el('input',{value:j.location||'',placeholder:'Location'}),sd=el('input',{value:j.start_date||'',placeholder:'Start'}),ed=el('input',{value:j.end_date||'',placeholder:'End/Present'}),d=el('textarea',{placeholder:'Description'}),b=el('textarea',{placeholder:'Bullets (one per line)'}); d.value=j.description||''; b.value=(j.bullets||[]).join('\n');
+  w.append(el('label',{},'Title'),t,el('label',{},'Company'),c,el('label',{},'Location'),l,el('div',{class:'row'},el('div',{},el('label',{},'Start'),sd),el('div',{},el('label',{},'End'),ed)),el('label',{},'Description'),d,el('label',{},'Bullets'),b);
+  w._get=()=>({title:t.value.trim(),company:c.value.trim(),location:l.value.trim(),start_date:sd.value.trim(),end_date:ed.value.trim(),description:d.value.trim(),bullets:b.value.split('\n').map(s=>s.trim()).filter(Boolean)}); return w; }
+function eduItem(e={}){ const w=el('div',{class:'item'}),deg=el('input',{value:e.degree||e.title||'',placeholder:'Degree / Title'}),inst=el('input',{value:e.institution||'',placeholder:'Institution'}),l=el('input',{value:e.location||'',placeholder:'Location'}),sd=el('input',{value:e.start_date||'',placeholder:'Start'}),ed=el('input',{value:e.end_date||'',placeholder:'End'}),det=el('textarea',{placeholder:'Details'}); det.value=e.details||'';
+  w.append(el('label',{},'Degree / Title'),deg,el('label',{},'Institution'),inst,el('label',{},'Location'),l,el('div',{class:'row'},el('div',{},el('label',{},'Start'),sd),el('div',{},el('label',{},'End'),ed)),el('label',{},'Details'),det);
+  w._get=()=>({degree:deg.value.trim(),title:deg.value.trim(),institution:inst.value.trim(),location:l.value.trim(),start_date:sd.value.trim(),end_date:ed.value.trim(),details:det.value.trim()}); return w; }
+function langItem(l={}){ const w=el('div',{class:'item'}),n=el('input',{value:l.name||l.language||l.lang||'',placeholder:'Language'}),lv=el('input',{value:l.level||'',placeholder:'Level (B2, C1)'}); w.append(el('label',{},'Language'),n,el('label',{},'Level'),lv); w._get=()=>({name:n.value.trim(),level:lv.value.trim()}); return w; }
+
+/* ---------- form state ---------- */
+let currentSourceName=null;
+let currentCV={ personal_info:{}, summary:"", skills_groups:[], work_experience:[], education:[], languages:[] };
+
+function fillForm(cv){
+  currentCV=cv||currentCV; const pi=currentCV.personal_info||{};
+  $("pi_full_name").value=pi.full_name||''; $("pi_headline").value=pi.headline||'';
+  $("pi_address").value=pi.address||''; $("pi_city").value=pi.city||''; $("pi_country").value=pi.country||'';
+  $("pi_email").value=pi.email||''; $("pi_phone").value=pi.phone||''; $("pi_website").value=pi.website||'';
+  $("pi_linkedin").value=pi.linkedin||''; $("pi_nationality").value=pi.nationality||''; $("pi_dob").value=pi.date_of_birth||''; $("pi_gender").value=pi.gender||'';
+  $("cv_summary").value=currentCV.summary || pi.summary || '';
+
+  $("skillsList").innerHTML=''; (currentCV.skills_groups||[]).forEach(g=>$("skillsList").appendChild(skillsItem(g)));
+  $("workList").innerHTML=''; (currentCV.work_experience||[]).forEach(j=>$("workList").appendChild(jobItem(j)));
+  $("eduList").innerHTML=''; (currentCV.education||[]).forEach(e=>$("eduList").appendChild(eduItem(e)));
+  $("langList").innerHTML=''; (currentCV.languages||[]).forEach(l=>$("langList").appendChild(langItem(l)));
+
+  refreshPreview();
+}
+function collectCV(){
+  const cv={ personal_info:{
+      full_name:$("pi_full_name").value.trim(), headline:$("pi_headline").value.trim(),
+      address:$("pi_address").value.trim(), city:$("pi_city").value.trim(), country:$("pi_country").value.trim(),
+      email:$("pi_email").value.trim(), phone:$("pi_phone").value.trim(), website:$("pi_website").value.trim(),
+      linkedin:$("pi_linkedin").value.trim(), nationality:$("pi_nationality").value.trim(),
+      date_of_birth:$("pi_dob").value.trim(), gender:$("pi_gender").value.trim(),
+      summary:$("cv_summary").value.trim()
+    },
+    summary:$("cv_summary").value.trim(),
+    skills_groups:[], work_experience:[], education:[], languages:[]
+  };
+  for(const n of $("skillsList").children) if(n._get) cv.skills_groups.push(n._get());
+  for(const n of $("workList").children) if(n._get) cv.work_experience.push(n._get());
+  for(const n of $("eduList").children) if(n._get) cv.education.push(n._get());
+  for(const n of $("langList").children) if(n._get) cv.languages.push(n._get());
+  return cv;
+}
+
+/* ---------- template (europass) for preview (client-side only) ---------- */
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+function tpl_europass(cv){
+  const pi=cv.personal_info||{}, full=esc(pi.full_name||""), title=esc(pi.headline||"");
+  const addr=[pi.address,pi.city,pi.country].filter(Boolean).join(", ");
+  const contacts=[
+    pi.email && {ico:"@",txt:pi.email}, pi.phone && {ico:"☎",txt:pi.phone},
+    pi.linkedin && {ico:"in",txt:pi.linkedin}, pi.website && {ico:"🌐",txt:pi.website},
+    addr && {ico:"📍",txt:addr}, pi.date_of_birth && {ico:"🎂",txt:pi.date_of_birth},
+    pi.gender && {ico:"⚧",txt:pi.gender}, pi.nationality && {ico:"🌎",txt:pi.nationality}
+  ].filter(Boolean);
+  const skills=(cv.skills_groups||[]).flatMap(g=>g.items||[]).map(s=>`<span class="eu-chip">${esc(s)}</span>`).join("");
+  const exp=(cv.work_experience||[]).map(e=>{
+    const dates=[e.start_date,e.end_date||"Present"].filter(Boolean).join(" – ");
+    const bullets=(e.bullets||[]).map(b=>`<li>${esc(b)}</li>`).join("");
+    return `<div class="eu-job"><div class="line1"><strong>${esc(e.title||"")}</strong> — ${esc(e.company||"")}</div>
+    <div class="line2">${esc(dates)}${e.location?` • ${esc(e.location)}`:""}</div>
+    ${e.description?`<div class="desc">${esc(e.description)}</div>`:""}${bullets?`<ul>${bullets}</ul>`:""}</div>`;
+  }).join("");
+  const edu=(cv.education||[]).map(ed=>{
+    const dates=[ed.start_date,ed.end_date].filter(Boolean).join(" – ");
+    return `<div class="eu-edu"><div class="line1"><strong>${esc(ed.degree||ed.title||"")}</strong> — ${esc(ed.institution||"")}</div>
+    <div class="line2">${esc(dates)}${ed.location?` • ${esc(ed.location)}`:""}</div>
+    ${ed.details?`<div class="desc">${esc(ed.details)}</div>`:""}</div>`;
+  }).join("");
+  const langs=(cv.languages||[]).map(l=>`<span class="eu-chip">${esc([l.name||l.language||l.lang,l.level].filter(Boolean).join(" — "))}</span>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"/>
+  <style>
+    @page { size:A4; margin:10mm } body{margin:0;font-family:"DejaVu Sans",Arial,Helvetica,sans-serif;font-size:12px;color:#0f172a}
+    .eu-root{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
+    .eu-side{background:${'var(--side)'};border-right:1px solid #e5e7eb;padding:22px}
+    .eu-main{padding:22px 26px} .eu-name{font-size:26px;font-weight:800;margin:0} .eu-title{font-size:13px;color:#475569;margin-top:4px}
+    .eu-kv{display:grid;grid-template-columns:22px 1fr;gap:10px;margin:6px 0} .ico{width:22px;height:22px;border-radius:6px;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:12px}
+    .eu-sec{margin-top:16px} .eu-sec h2{font-size:14px;font-weight:800;margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em}
+    .eu-chip{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #e0e7ff;border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}
+    .eu-job{margin:12px 0 10px} .line2{color:#64748b;font-size:12px;margin-top:2px} .desc{margin-top:6px} .eu-job ul{margin:6px 0 0 18px}
+    .hr{height:1px;background:linear-gradient(90deg,#e5e7eb 60%,transparent 0) repeat-x;background-size:8px 1px;margin:14px 0}
+  </style></head>
+  <body><div class="eu-root">
+    <aside class="eu-side">
+      <h1 class="eu-name">${full}</h1>${title?`<div class="eu-title">${title}</div>`:""}
+      <div>${contacts.map(c=>`<div class="eu-kv"><div class="ico">${esc(c.ico)}</div><div>${esc(c.txt)}</div></div>`).join("")}</div>
+      ${skills?`<div class="eu-sec"><h2>Skills</h2><div>${skills}</div></div>`:""}
+      ${langs?`<div class="eu-sec"><h2>Languages</h2><div>${langs}</div></div>`:""}
+    </aside>
+    <main class="eu-main">
+      ${(cv.summary||pi.summary)?`<section class="eu-sec"><h2>About Me</h2><div>${esc(cv.summary||pi.summary||"")}</div></section><div class="hr"></div>`:""}
+      ${exp?`<section class="eu-sec"><h2>Work Experience</h2>${exp}</section>`:""}
+      ${edu?`<section class="eu-sec"><h2>Education & Training</h2>${edu}</section>`:""}
+    </main>
+  </div></body></html>`;
+}
+
+/* ---------- preview/export orchestrators ---------- */
+function renderTemplate(name, cv){
+  // keep europass default behavior
+  const t = (name||"europass").toLowerCase();
+  if (t === "kyndryl") {
+    // recolor sidebar to Kyndryl red + white text; keep main column dark on white
+    let html = tpl_europass(cv)
+      .replace(/background:var\(--side\)/g, 'background:#c4122f;color:#fff;border-right:1px solid #a60f24');
+    // sidebar icons to white-ish
+    html = html.replace(/background:#e2e8f0/g, 'background:rgba(255,255,255,.18);color:#fff');
+    // chips in sidebar to white-on-red
+    html = html.replace(/\.eu-chip\{[^}]*\}/, '.eu-chip{display:inline-block;background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}');
+    return html; // .eu-main remains color:#0f172a
   }
+  return tpl_europass(cv);
+}
+function refreshPreview(){ const html = renderTemplate($("templateName").value, collectCV()); $("preview-frame").srcdoc = html; }
 
-  function safeJSON(text){
-    try{ return JSON.parse(text) }catch(e){ return null }
-  }
+function downloadFromUrlToFile(url, filename){
+  fetch(url).then(r=>r.blob()).then(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=filename||'cv.pdf'; a.click(); URL.revokeObjectURL(a.href); });
+}
 
-  function setBusy(b){ 
-    $btnN.disabled = b; 
-    $btnE.disabled = b || !$txt.value.trim(); 
-  }
+/* ---------- EXTRACT ---------- */
+async function fileToBase64(file){
+  return await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(file); });
+}
+async function callCvAgentNormalizeOnly(file){
+  const dbg=$("extractLog"); dbg.style.display='block'; dbg.textContent='Preparing…';
+  const b64=await fileToBase64(file); const kb=Math.round((b64.length*3/4)/1024);
+  const payload={ pptx_base64:b64, pptx_name:file.name, mode:"normalize_only" };
+  const url=cvagentUrl(); dbg.textContent=`POST ${url}\nfile: ${file.name} (~${kb} KB)`;
+  let resp,text,data;
+  try{ resp=await fetch(url,{method:'POST',headers:jsonHeaders(),body:JSON.stringify(payload)}); }
+  catch(e){ dbg.textContent+=`\nNetwork error: ${e.message}`; throw new Error(`Network error calling cvagent: ${e.message}`); }
+  text=await resp.text(); try{ data=JSON.parse(text);}catch{ data={raw:text}; }
+  dbg.textContent+=`\nstatus: ${resp.status}`; if(!resp.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${resp.status}`; dbg.textContent+=`\nerror: ${msg}`; throw new Error(msg); }
+  dbg.textContent+=`\n✓ normalize_only OK`; return (data.cv||data.normalized||data.result||data);
+}
 
-  // ------------------ Normalize ------------------
-  $btnN.addEventListener("click", async () => {
-    const f = $pptx.files && $pptx.files[0];
-    if(!f){ alert("Please choose a PPTX file first."); return; }
-    setBusy(true);
-    try{
-      sourceName = f.name;
-      const b64 = await toBase64(f);
-      const res = await fetch("/api/cvagent", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-          pptx_base64: b64,
-          pptx_name: sourceName,
-          mode: "normalize_only"
-        })
-      });
-      const data = await res.json();
-      if(!res.ok){ throw new Error(data.error || "Normalize failed"); }
-      const cv = data.cv || data.normalized || data;
-      $txt.value = JSON.stringify(cv, null, 2);
-      $btnE.disabled = false;
-      $out.textContent = "—";
-      $out.classList.add("muted");
-      renderPreview();
-    }catch(e){
-      alert("Extract/Normalize error: " + e.message);
-    }finally{
-      setBusy(false);
-    }
+/* ---------- EXPORT (via cvagent) ---------- */
+async function exportViaCvAgent(){
+  const cv=collectCV(), out=($("outName").value||"cv.pdf").trim(), template=($("templateName").value||"europass").toLowerCase();
+  const url=cvagentUrl(); const payload={ file_name: out, template, return:"url", cv };
+  const res=await fetch(url,{method:'POST',headers:jsonHeaders(),body:JSON.stringify(payload)});
+  const text=await res.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
+  if(!res.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${res.status}`; throw new Error(`cvagent render failed: ${msg}`); }
+  const pdfUrl=data.pdf_url||data.url||data.sas_url||data.link; if(!pdfUrl) throw new Error("No pdf_url returned by cvagent/render");
+  return pdfUrl;
+}
+
+/* ---------- events ---------- */
+$("pptxFile").addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f){ currentSourceName=f.name; $("outName").value=toPdfName(f.name);} });
+
+$("btnExtract").addEventListener('click', async ()=>{
+  const f=$("pptxFile").files[0]; if(!f){ alert('Choose a PPTX first'); return; }
+  try{ const cv=await callCvAgentNormalizeOnly(f); fillForm(cv); $("extractLog").textContent += '\nDone. You can edit below.'; }
+  catch(e){ alert('Extract error: '+(e.message||e)); }
+});
+
+$("btnLoadSample").addEventListener('click', ()=>{
+  fillForm({
+    personal_info:{ full_name:'Ada Lovelace', headline:'Computing Pioneer', city:'London', country:'UK', email:'ada@example.com', linkedin:'linkedin.com/in/ada' },
+    summary:'Visionary mathematician; wrote the first algorithm intended to be executed by a machine.',
+    skills_groups:[{group:'Tech', items:['Analysis','Algorithms','Mathematics']}],
+    work_experience:[{title:'Analyst', company:'Analytical Engine', start_date:'1842', end_date:'1852', location:'London', bullets:['Translated Menabrea','Conceived loop & subroutine']}],
+    education:[{degree:'Mathematics', institution:'Private tutelage', start_date:'1830', end_date:'1840'}],
+    languages:[{name:'English', level:'Native'}]
   });
+});
 
-  // ------------------ Export ------------------
-  $btnE.addEventListener("click", async () => {
-    const cv = safeJSON($txt.value);
-    if(!cv){ alert("Invalid JSON in CV preview."); return; }
-    const template = $tpl.value;
-    setBusy(true);
-    try{
-      const res = await fetch("/api/cvagent", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-          cv: cv,
-          template: template,
-          source_name: sourceName || "cv.pptx"
-        })
-      });
-      const data = await res.json();
-      if(!res.ok){ throw new Error(data.error || "Export failed"); }
-      const url = data.pdf_url || (data.blob && data.blob.url) || data.url;
-      if(!url){ throw new Error("No pdf_url returned by server"); }
-      $out.innerHTML = `<a href="${url}" target="_blank" rel="noopener">Download PDF</a>`;
-      $out.classList.remove("muted");
-    }catch(e){
-      alert("Export error: " + e.message);
-    }finally{
-      setBusy(false);
-    }
-  });
+$("addSkillGrp").addEventListener('click', ()=>$("skillsList").appendChild(skillsItem({group:'',items:[]})));
+$("addJob").addEventListener('click', ()=>$("workList").appendChild(jobItem({})));
+$("addEdu").addEventListener('click', ()=>$("eduList").appendChild(eduItem({})));
+$("addLang").addEventListener('click', ()=>$("langList").appendChild(langItem({})));
 
-  // ------------------ Live preview ------------------
-  $tpl.addEventListener("change", renderPreview);
-  $txt.addEventListener("input", renderPreview);
+$("btnRefreshPreview").addEventListener('click', refreshPreview);
 
-  function tpl_europass(cv){
-    return `<div class="eu-root" style="display:grid;grid-template-columns:320px 1fr;min-height:300px;font-family:sans-serif">
-      <aside class="eu-side" style="background:#f8fafc;border-right:1px solid #e5e7eb;padding:22px">
-        <div style="font-size:22px;font-weight:700">${cv.personal_info?.full_name||""}</div>
-        <div style="font-size:13px;margin-top:4px">${cv.personal_info?.headline||""}</div>
-      </aside>
-      <main class="eu-main" style="padding:22px 26px;background:#fff;color:#0f172a">
-        <h3>Summary</h3>
-        <p>${cv.summary||""}</p>
-      </main>
-    </div>`;
-  }
+$("btnExport").addEventListener('click', async ()=>{
+  $("exportStatus").textContent='Rendering…'; $("blobLink").innerHTML=''; $("localLink").innerHTML='';
+  try{
+    const url=await exportViaCvAgent();
+    $("exportStatus").textContent='Done.';
+    $("blobLink").innerHTML=`<a href="${url}" target="_blank" rel="noopener">Open PDF in Blob</a>`;
+    const a=document.createElement('a'); a.href='#'; a.className='btn secondary'; a.textContent='Download locally';
+    a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(url, $("outName").value || 'cv.pdf'); });
+    $("localLink").appendChild(a);
+  }catch(e){ $("exportStatus").textContent='Error'; alert(e.message||e); }
+});
 
-  // -------- Template Switch (Europass / Kyndryl) --------
-  function renderTemplate(name, cv){
-    const tplName = (name || "europass").toLowerCase();
-    if(tplName === "kyndryl"){
-      const htmlK = tpl_europass(cv)
-        .replace(/background:#f8fafc/g, 'background:#c4122f;color:#fff;border-right:1px solid #a60f24')
-        .replace(/color:#0f172a/g, 'color:#0f172a');
-      return htmlK;
-    }
-    return tpl_europass(cv);
-  }
-
-  function renderPreview(){
-    const cv = safeJSON($txt.value) || {};
-    const tpl = $tpl.value;
-    const html = renderTemplate(tpl, cv);
-    $prev.innerHTML = html;
-  }
-  </script>
+/* auto-fill base when hosted on the Function App */
+window.addEventListener('load', ()=>{ try{ if(location.hostname.endsWith('.azurewebsites.net')) $("baseUrl").value = location.origin + '/'; }catch{} });
+</script>
 </body>
 </html>

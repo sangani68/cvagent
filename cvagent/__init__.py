@@ -1,44 +1,51 @@
-import os, json, logging, base64
+import os, json, logging, base64, io
 import azure.functions as func
 import requests
+from datetime import datetime, timedelta, timezone
 from jinja2 import Environment, BaseLoader, select_autoescape
 
+# Azure Blob
+from azure.storage.blob import (
+    BlobServiceClient,
+    ContentSettings,
+    generate_blob_sas,
+    BlobSasPermissions
+)
+
 # =========================
-# Config (from App Settings)
+# Config (App Settings)
 # =========================
 BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
             or os.environ.get("FUNCS_BASE_URL")  # optional alias
             or "").rstrip("/")
 
-# Downstream paths (these are your other HTTP functions)
 PPTXEXTRACT_PATH  = os.environ.get("PPTXEXTRACT_PATH",  "/api/pptxextract")
 CVNORMALIZE_PATH  = os.environ.get("CVNORMALIZE_PATH",  "/api/cvnormalize")
 RENDER_PATH       = os.environ.get("RENDER_PATH",       "/api/renderpdf_html")
 
-# Optional function keys (leave empty if those funcs are anonymous)
 PPTXEXTRACT_KEY   = os.environ.get("PPTXEXTRACT_KEY",   "")
 CVNORMALIZE_KEY   = os.environ.get("CVNORMALIZE_KEY",   "")
 RENDER_KEY        = os.environ.get("RENDER_KEY",        "")
 
-# Timeouts
 HTTP_TIMEOUT_SEC  = int(os.environ.get("HTTP_TIMEOUT_SEC", "180"))
 
+# Blob config
+CONN_STR          = os.environ.get("AzureWebJobsStorage")  # required
+INCOMING_CONTAINER= os.environ.get("INCOMING_CONTAINER", "incoming")
+STORAGE_ACCOUNT   = os.environ.get("STORAGE_ACCOUNT_NAME")  # optional but recommended for SAS
+STORAGE_KEY       = os.environ.get("STORAGE_ACCOUNT_KEY")   # optional but recommended for SAS
+SAS_MINUTES       = int(os.environ.get("SAS_MINUTES", "120"))
+
 # =========================
-# HTTP helper
+# Helpers
 # =========================
 def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
-    """
-    Build a full URL for downstream calls.
-    If BASE_URL is set, use it; otherwise derive from the current request host.
-    Append ?code=... when key is provided.
-    """
+    """Build full URL for downstream call; append ?code=... if key provided."""
     if path.startswith("http"):
         url = path
     elif BASE_URL:
         url = f"{BASE_URL}{path}"
     else:
-        # derive from current request url (same app)
-        # e.g. https://<app>.azurewebsites.net/api/cvagent  -> replace trailing path
         root = req.url.split("/api/")[0]
         url = f"{root}{path}"
     if key:
@@ -47,9 +54,7 @@ def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
     return url
 
 def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC) -> (int, dict, str):
-    """
-    POST JSON and return (status, json_or_none, raw_text).
-    """
+    """POST JSON and return (status, json_or_none, raw_text)."""
     try:
         r = requests.post(url, json=payload, timeout=timeout)
     except Exception as e:
@@ -62,7 +67,49 @@ def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC) -> (int
     return r.status_code, data, text
 
 # =========================
-# Jinja2 template (europass)
+# Blob: upload + SAS
+# =========================
+_bsc = BlobServiceClient.from_connection_string(CONN_STR) if CONN_STR else None
+
+def _ensure_container(name: str):
+    try:
+        _bsc.create_container(name)
+    except Exception:
+        pass  # exists
+
+def _upload_pptx_and_get_sas(pptx_bytes: bytes, blob_name: str) -> str:
+    """Upload PPTX to INCOMING_CONTAINER and return a READ SAS URL."""
+    if _bsc is None:
+        raise RuntimeError("AzureWebJobsStorage is not configured")
+
+    _ensure_container(INCOMING_CONTAINER)
+    bc = _bsc.get_blob_client(container=INCOMING_CONTAINER, blob=blob_name)
+    bc.upload_blob(io.BytesIO(pptx_bytes), overwrite=True,
+                   content_settings=ContentSettings(content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"))
+
+    # Build primary URL
+    account_url = _bsc.url  # e.g., https://<acct>.blob.core.windows.net
+    base_url = account_url.rstrip("/")
+    blob_url = f"{base_url}/{INCOMING_CONTAINER}/{blob_name}"
+
+    # Generate SAS (requires STORAGE_ACCOUNT_NAME & STORAGE_ACCOUNT_KEY)
+    if not (STORAGE_ACCOUNT and STORAGE_KEY):
+        # If you can't set name/key, you could make the container public (not recommended).
+        # Without SAS, extractor must accept a non-SAS URL.
+        return blob_url
+
+    sas = generate_blob_sas(
+        account_name=STORAGE_ACCOUNT,
+        container_name=INCOMING_CONTAINER,
+        blob_name=blob_name,
+        account_key=STORAGE_KEY,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.now(timezone.utc) + timedelta(minutes=SAS_MINUTES),
+    )
+    return f"{blob_url}?{sas}"
+
+# =========================
+# Jinja2 Europass Template
 # =========================
 _EUROPASS_HTML = """<!doctype html>
 <html><head>
@@ -136,37 +183,26 @@ _EUROPASS_HTML = """<!doctype html>
 </body></html>
 """
 
-def _build_html_from_cv(cv: dict, template_name: str = "europass") -> str:
+def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     env = Environment(loader=BaseLoader(), autoescape=select_autoescape(['html']))
-    tpl = _EUROPASS_HTML  # later: branch by template_name
-    j = env.from_string(tpl)
-
+    j = env.from_string(_EUROPASS_HTML)
     pi = (cv.get("personal_info") or cv.get("personal") or {}) if isinstance(cv, dict) else {}
 
-    # contacts
     contacts = []
     def add(icon, val):
         if val: contacts.append({"ico": icon, "txt": val})
-    add("@",  pi.get("email"))
-    add("☎",  pi.get("phone"))
-    add("in", pi.get("linkedin"))
+    add("@",  pi.get("email")); add("☎", pi.get("phone")); add("in", pi.get("linkedin"))
     add("🌐", pi.get("website"))
     addr = ", ".join([pi.get("address") or "", pi.get("city") or "", pi.get("country") or ""]).strip(", ")
-    add("📍", addr)
-    add("🎂", pi.get("date_of_birth"))
-    add("⚧", pi.get("gender"))
-    add("🌎", pi.get("nationality"))
+    add("📍", addr); add("🎂", pi.get("date_of_birth")); add("⚧", pi.get("gender")); add("🌎", pi.get("nationality"))
 
-    # skills
     skills = []
     for g in (cv.get("skills_groups") or []):
         skills.extend(g.get("items") or [])
 
     model = {
-        "person": {
-            "full_name": pi.get("full_name") or cv.get("name"),
-            "title":     pi.get("headline")  or cv.get("title"),
-        },
+        "person": {"full_name": pi.get("full_name") or cv.get("name"),
+                   "title":     pi.get("headline")  or cv.get("title")},
         "contacts": contacts,
         "skills": skills,
         "languages": cv.get("languages") or [],
@@ -186,26 +222,37 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception:
         return func.HttpResponse(json.dumps({"error": "Invalid JSON"}), status_code=400, mimetype="application/json")
 
-    # -------- Extract + Normalize --------
+    # -------- Extract + Normalize (now using blob SAS for extractor) --------
     if body.get("mode") == "normalize_only":
-        # Expecting: { pptx_base64, pptx_name }
         pptx_b64 = body.get("pptx_base64")
         pptx_name = body.get("pptx_name") or "resume.pptx"
         if not pptx_b64:
             return func.HttpResponse(json.dumps({"error": "Missing pptx_base64"}), status_code=400, mimetype="application/json")
 
-        # 1) Call pptxextract (prefer base64 path)
+        try:
+            pptx_bytes = base64.b64decode(pptx_b64)
+        except Exception as e:
+            return func.HttpResponse(json.dumps({"error": f"Invalid base64: {e}"}), status_code=400, mimetype="application/json")
+
+        # Upload to Blob and make a read SAS URL for the extractor
+        try:
+            # unique blob name (keep original name for readability)
+            ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            blob_name = f"{ts}-{pptx_name}"
+            sas_url = _upload_pptx_and_get_sas(pptx_bytes, blob_name)
+        except Exception as e:
+            logging.exception("Upload/SAS failed")
+            return func.HttpResponse(json.dumps({"error": f"Blob upload/SAS failed: {e}"}), status_code=500, mimetype="application/json")
+
+        # 1) Call pptxextract with SAS URL
         extract_url = _build_url(req, PPTXEXTRACT_PATH, PPTXEXTRACT_KEY)
-        extract_payload = {"pptx_base64": pptx_b64, "pptx_name": pptx_name}
+        extract_payload = {"ppt_blob_sas": sas_url, "pptx_name": pptx_name}
         s, data, raw = _post_json(extract_url, extract_payload)
         if s != 200 or not data:
             msg = data.get("error") if isinstance(data, dict) else raw
-            return func.HttpResponse(
-                json.dumps({"error": f"pptxextract failed ({s}): {msg}"}),
-                status_code=500, mimetype="application/json"
-            )
+            return func.HttpResponse(json.dumps({"error": f"pptxextract failed ({s}): {msg}"}),
+                                     status_code=500, mimetype="application/json")
 
-        # The extractor should return a structured "raw" dict; support common keys:
         raw_cv = data.get("raw") or data.get("raw3") or data  # be liberal
         if not isinstance(raw_cv, dict):
             return func.HttpResponse(json.dumps({"error": "pptxextract returned no structured data"}), status_code=500, mimetype="application/json")
@@ -216,12 +263,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         s2, norm, raw2 = _post_json(normalize_url, normalize_payload)
         if s2 != 200 or not norm:
             msg = norm.get("error") if isinstance(norm, dict) else raw2
-            return func.HttpResponse(
-                json.dumps({"error": f"cvnormalize failed ({s2}): {msg}"}),
-                status_code=500, mimetype="application/json"
-            )
+            return func.HttpResponse(json.dumps({"error": f"cvnormalize failed ({s2}): {msg}"}),
+                                     status_code=500, mimetype="application/json")
 
-        # Standardize response for the UI:
         normalized = norm.get("cv") or norm.get("normalized") or norm
         return func.HttpResponse(json.dumps({"cv": normalized}), status_code=200, mimetype="application/json")
 
@@ -231,17 +275,18 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         out_name = body.get("file_name") or body.get("out_name") or "cv.pdf"
         template = (body.get("template") or "europass").lower()
 
-        # Build HTML from normalized CV for renderer (renderer expects 'html')
         try:
-            html = _build_html_from_cv(cv, template)
+            html = _html_from_cv(cv, template)
         except Exception as e:
             logging.exception("Template render failed")
             return func.HttpResponse(json.dumps({"error": f"Template render failed: {str(e)}"}), status_code=500, mimetype="application/json")
 
         render_url = _build_url(req, RENDER_PATH, RENDER_KEY)
-        payload = {"out_name": out_name if out_name.lower().endswith(".pdf") else out_name + ".pdf",
-                   "html": html, "css": ""}
-
+        payload = {
+            "out_name": out_name if out_name.lower().endswith(".pdf") else out_name + ".pdf",
+            "html": html,
+            "css": ""   # CSS is inlined
+        }
         s3, rjson, rraw = _post_json(render_url, payload)
         if s3 != 200 or not rjson:
             return func.HttpResponse(

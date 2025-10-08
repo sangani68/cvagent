@@ -124,33 +124,19 @@ def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
 # TEMPLATE (EUROPASS → HTML)
 # ==============================================================
 
-# --- Kyndryl variant (improved color, sidebar white text, logo + photo support) ---
+# --- Kyndryl variant (red sidebar, white text in second column) ---
 _KYNDRYL_HTML = _EUROPASS_HTML \
     .replace('#f8fafc', '#c4122f')  # Sidebar background red
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24')  # Sidebar border
-    .replace('background:#fff;color:#0f172a', 'background:#fff;color:#0f172a')  # Main column dark text on white
+    .replace('background:#fff;color:#0f172a', 'background:#fff;color:#0f172a')  # Ensure dark text on white in second column
 
 _KYNDRYL_HTML = _KYNDRYL_HTML.replace('</style>', r'''
-  /* Kyndryl styling for sidebar + photo + logo */
+  /* Kyndryl styling for sidebar */
   .kynd-logo{margin:0 0 14px 0; display:flex; align-items:center; gap:10px}
   .kynd-logo svg{height:18px; width:auto; fill:#fff}
-  .photo{margin:0 0 14px 0}
-  .photo img{width:92px;height:92px;border-radius:999px;border:3px solid rgba(255,255,255,.6);object-fit:cover;display:block}
   .eu-side, .eu-side h2, .eu-side .eu-title, .eu-side .eu-name{color:#fff}
   .eu-side .ico{background:rgba(255,255,255,.18);color:#fff}
-  .eu-chip{display:inline-block;background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}
 </style>''')
-
-_KYNDRYL_HTML = _KYNDRYL_HTML.replace('<aside class="eu-side">', r'''<aside class="eu-side">
-      <div class="kynd-logo">
-        <svg viewBox="0 0 200 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-          <rect width="200" height="24" fill="none"/>
-          <text x="0" y="17" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="18" fill="#ffffff">kyndryl</text>
-        </svg>
-      </div>
-      {% if person.photo_url %}<div class="photo"><img src="{{ person.photo_url }}" alt="Profile photo"/></div>{% endif %}
-''')
-
 _EUROPASS_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"/>
 <title>{{ person.full_name or 'Curriculum Vitae' }}</title>
@@ -222,14 +208,6 @@ _EUROPASS_HTML = """<!doctype html>
 </body></html>
 """
 
-# --- Kyndryl variant (same layout, brand red sidebar, white text; main stays dark on white) ---
-_KYNDRYL_HTML = _EUROPASS_HTML \
-    .replace('#f8fafc', '#c4122f') \
-    .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24') \
-    .replace('color:#0f172a', 'color:#fff') \
-    .replace('background:#fff;', 'background:#fff;color:#0f172a;')
-
-
 def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     env = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))
     j = env.from_string(_KYNDRYL_HTML if (template_name or "europass").lower() == "kyndryl" else _EUROPASS_HTML)
@@ -244,8 +222,7 @@ def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     skills = [s for g in (cv.get("skills_groups") or []) for s in (g.get("items") or [])]
     model = {
         "person": {"full_name": pi.get("full_name") or cv.get("name"),
-                   "title":     pi.get("headline")  or cv.get("title"),
-                   "photo_url": pi.get("photo_url")},
+                   "title":     pi.get("headline")  or cv.get("title")},
         "contacts": contacts,
         "skills": skills,
         "languages": cv.get("languages") or [],

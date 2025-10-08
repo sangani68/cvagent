@@ -124,7 +124,7 @@ def _upload_and_sas(pptx_bytes: bytes, blob_name: str) -> str:
 # TEMPLATE (EUROPASS → HTML)
 # ==============================================================
 
-# --- Kyndryl variant (red sidebar, white text, logo, and profile picture) ---
+# --- Kyndryl variant (improved color, sidebar white text, logo + photo support) ---
 _KYNDRYL_HTML = _EUROPASS_HTML \
     .replace('#f8fafc', '#c4122f')  # Sidebar background red
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24')  # Sidebar border

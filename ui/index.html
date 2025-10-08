@@ -34,8 +34,8 @@
       <div><label>Template</label>
         <select id="templateName">
           <option value="europass" selected>europass</option>
-        <option value="kyndryl">Kyndryl (red sidebar)</option>
           <!-- add more templates later -->
+          <option value="kyndryl">Kyndryl (red sidebar)</option>
         </select>
       </div>
     </div>
@@ -268,7 +268,18 @@ function tpl_europass(cv){
 }
 
 /* ---------- preview/export orchestrators ---------- */
-function renderTemplate(name, cv){ switch((name||"europass").toLowerCase()){ case "europass": default: return tpl_europass(cv); } }
+function renderTemplate(name, cv){
+  switch((name||"europass").toLowerCase()){
+    case "kyndryl":
+      const htmlK = tpl_europass(cv)
+        .replace(/background:var\(--side\)/g, 'background:#c4122f;color:#fff;border-right:1px solid #a60f24')
+        .replace(/color:#0f172a/g, 'color:#0f172a');
+      return htmlK;
+    case "europass":
+    default:
+      return tpl_europass(cv);
+  }
+} }
 function refreshPreview(){ const html = renderTemplate($("templateName").value, collectCV()); $("preview-frame").srcdoc = html; }
 
 function downloadFromUrlToFile(url, filename){

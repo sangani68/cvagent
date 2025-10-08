@@ -274,9 +274,9 @@ function renderTemplate(name, cv){
   if (t === "kyndryl") {
     // recolor sidebar to Kyndryl red + white text; keep main column dark on white
     let html = tpl_europass(cv)
-      .replace(/background:var\(--side\)/g, 'background:#c4122f;color:#0f172a;border-right:1px solid #a60f24');
+      .replace(/background:var\(--side\)/g, 'background:#F9423A;color:#0f172a;border-right:1px solid #a60f24');
     // sidebar icons to white-ish
-    html = html.replace(/background:#e2e8f0/g, 'background:rgba(255,255,255,.18);color:#fff');
+    html = html.replace(/background:#e2e8f0/g, 'background:rgba(255,255,255,.18);color:#0f172a');
     // chips in sidebar to white-on-red
     html = html.replace(/\.eu-chip\{[^}]*\}/, '.eu-chip{display:inline-block;background:rgba(255,255,255,.18);color:#0f172a;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}');
     return html; // .eu-main remains color:#0f172a

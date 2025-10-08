@@ -9,21 +9,13 @@
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial}
   .wrap{max-width:1140px;margin:28px auto 80px;padding:0 16px} h1{font-size:22px;margin:0 0 8px} p{margin:0 0 12px;color:var(--muted)}
   .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
   input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font:inherit}
-  textarea{min-height:90px}
-  .btn{appearance:none;border:0;background:var(--brand);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
-  .btn.secondary{background:#1118270d;color:#111827}
-  .btn:disabled{opacity:.6;cursor:not-allowed}
-  .toolbar{display:flex;flex-wrap:wrap;gap:8px}
-  .list{display:grid;gap:12px}
-  .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
-  .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:260px;overflow:auto;white-space:pre-wrap}
-  #preview-frame{width:100%;height:880px;border:1px solid var(--line);border-radius:12px}
-  details[open] summary{margin-bottom:8px}
-  summary{cursor:pointer}
-  .ok{color:#16a34a}.err{color:#dc2626}.muted{color:#64748b}
+  textarea{min-height:90px} .btn{appearance:none;border:0;background:var(--brand);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
+  .btn.secondary{background:#1118270d;color:#111827} .btn:disabled{opacity:.6;cursor:not-allowed} .toolbar{display:flex;flex-wrap:wrap;gap:8px}
+  .list{display:grid;gap:12px} .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
+  .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap}
+  #preview-frame{width:100%;height:900px;border:1px solid var(--line);border-radius:12px}
 </style>
 </head>
 <body>
@@ -41,26 +33,12 @@
       <div><label>cvagent route</label><input id="cvagentPath" value="api/cvagent"/></div>
       <div><label>Template</label>
         <select id="templateName">
-          <option value="europass" selected>Europass</option>
-          <option value="kyndryl">Kyndryl (Red Sidebar)</option>
+          <option value="europass" selected>europass</option>
+          <!-- add more templates later -->
         </select>
       </div>
     </div>
-
-    <details style="margin-top:10px">
-      <summary><strong>Kyndryl options</strong> (optional)</summary>
-      <div class="row">
-        <div style="grid-column:1 / -1">
-          <label>Kyndryl logo (data URL) — paste your <code>data:image/...;base64,....</code></label>
-          <textarea id="kyndrylLogoData" placeholder="data:image/png;base64,iVBORw0K..."></textarea>
-          <div class="muted" style="font-size:12px;margin-top:6px">
-            If blank, the server uses the default online logo. Using a data URL is most reliable for PDF.
-          </div>
-        </div>
-      </div>
-    </details>
-
-    <p class="muted" style="margin-top:8px">Same origin → keep Base URL “/”. If hosted elsewhere, use your Function URL with trailing slash.</p>
+    <p style="color:#64748b;margin-top:8px">Same origin → keep Base URL “/”. If hosted elsewhere, use your Function URL with trailing slash.</p>
   </div>
 
   <!-- Step 1 -->
@@ -73,7 +51,7 @@
       </div>
       <div>
         <label>Output PDF file name</label>
-        <input id="outName" value="cv-europass.pdf"/>
+        <input id="outName" value="cv-from-pptx.pdf"/>
       </div>
     </div>
     <div class="toolbar" style="margin-top:12px">
@@ -114,7 +92,7 @@
     <div style="font-weight:700;margin-top:14px">Summary / About</div>
     <textarea id="cv_summary"></textarea>
 
-    <div style="font-weight:700;margin-top:14px">Skills groups <span class="muted">(comma-separated items)</span></div>
+    <div style="font-weight:700;margin-top:14px">Skills groups <span style="color:#64748b">(comma-separated items)</span></div>
     <div id="skillsList" class="list"></div>
     <div class="toolbar"><button class="btn secondary" type="button" id="addSkillGrp">+ Add group</button></div>
 
@@ -145,15 +123,15 @@
     <div style="font-weight:700;margin-bottom:8px">4) Export PDF</div>
     <div class="toolbar">
       <button class="btn" id="btnExport">Export PDF</button>
-      <div id="exportStatus" style="margin-left:8px" class="muted"></div>
+      <div id="exportStatus" style="margin-left:8px;color:#64748b"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
       <div>
-        <div class="muted">Blob link</div>
+        <div style="color:#64748b">Blob link</div>
         <div id="blobLink" style="margin-top:8px"></div>
       </div>
       <div style="text-align:right">
-        <div class="muted">Local download</div>
+        <div style="color:#64748b">Local download</div>
         <div id="localLink" style="margin-top:8px"></div>
       </div>
     </div>
@@ -169,7 +147,8 @@
 /* ---------- helpers ---------- */
 const $ = id => document.getElementById(id);
 const jsonHeaders = () => ({ "Content-Type": "application/json" });
-const EXT_RE = /\.(pptx|pptm|ppt|ppsx|potx|potm|odp|ppt)$/i;
+const EXT_RE = /\.(pptx|pptm|ppt|ppsx|potx|potm|odp)$/i;
+const toPdfName = n => (n || 'cv').replace(EXT_RE,'').replace(/\.+$/,'') + '.pdf';
 
 const logEl = $("log");
 const xlog = (...args) => { logEl.textContent += args.map(a => typeof a==='string'? a : JSON.stringify(a,null,2)).join(' ') + "\n"; logEl.scrollTop = logEl.scrollHeight; };
@@ -178,19 +157,7 @@ function buildBase(){ const v = $("baseUrl").value.trim() || "/"; return v.endsW
 function withKey(url){ const key = $("funcKey").value.trim(); return key ? url + (url.includes("?")?"&":"?") + "code=" + encodeURIComponent(key) : url; }
 function cvagentUrl(){ const route = ($("cvagentPath").value || "api/cvagent").replace(/^\/+/, ""); return withKey(buildBase() + route); }
 
-let currentSourceName = null;
-function baseName(name){
-  if(!name) return "cv";
-  const n = name.replace(/^.*[\\/]/,''); // strip path
-  return n.replace(EXT_RE,'').replace(/\.+$/,'') || "cv";
-}
-function computeOutName(){
-  const base = baseName(currentSourceName);
-  const template = ($("templateName").value || "europass").toLowerCase();
-  return `${base}-${template}.pdf`;
-}
-function updateOutName(){ $("outName").value = computeOutName(); }
-
+/* ---------- UI builders ---------- */
 function el(tag, attrs={}, ...children){
   const e=document.createElement(tag);
   for(const [k,v] of Object.entries(attrs)){ if(k==="class") e.className=v; else if(k==="value") e.value=v; else e.setAttribute(k,v); }
@@ -209,6 +176,7 @@ function eduItem(e={}){ const w=el('div',{class:'item'}),deg=el('input',{value:e
 function langItem(l={}){ const w=el('div',{class:'item'}),n=el('input',{value:l.name||l.language||l.lang||'',placeholder:'Language'}),lv=el('input',{value:l.level||'',placeholder:'Level (B2, C1)'}); w.append(el('label',{},'Language'),n,el('label',{},'Level'),lv); w._get=()=>({name:n.value.trim(),level:lv.value.trim()}); return w; }
 
 /* ---------- form state ---------- */
+let currentSourceName=null;
 let currentCV={ personal_info:{}, summary:"", skills_groups:[], work_experience:[], education:[], languages:[] };
 
 function fillForm(cv){
@@ -245,96 +213,61 @@ function collectCV(){
   return cv;
 }
 
-/* ---------- PDF-safe preview templates (table layout) ---------- */
-function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]))}
-function asLangChips(langs){return (langs||[]).map(l=>esc([l.name||l.language||l.lang,l.level].filter(Boolean).join(" — ")))}
-
-function euroLikeTemplate(cv, theme){
-  const pi=cv.personal_info||{};
-  const name=esc(pi.full_name||"");
-  const role=esc(pi.headline||"");
-  const location=esc([pi.city,pi.country].filter(Boolean).join(", "));
-  const summary=esc(cv.summary||pi.summary||"");
-  const languages=asLangChips(cv.languages||[]);
-  const skills=(cv.skills_groups||[]).flatMap(g=>g.items||[]).map(s=>`<span class="chip">${esc(s)}</span>`).join("");
+/* ---------- template (europass) for preview (client-side only) ---------- */
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+function tpl_europass(cv){
+  const pi=cv.personal_info||{}, full=esc(pi.full_name||""), title=esc(pi.headline||"");
+  const addr=[pi.address,pi.city,pi.country].filter(Boolean).join(", ");
+  const contacts=[
+    pi.email && {ico:"@",txt:pi.email}, pi.phone && {ico:"☎",txt:pi.phone},
+    pi.linkedin && {ico:"in",txt:pi.linkedin}, pi.website && {ico:"🌐",txt:pi.website},
+    addr && {ico:"📍",txt:addr}, pi.date_of_birth && {ico:"🎂",txt:pi.date_of_birth},
+    pi.gender && {ico:"⚧",txt:pi.gender}, pi.nationality && {ico:"🌎",txt:pi.nationality}
+  ].filter(Boolean);
+  const skills=(cv.skills_groups||[]).flatMap(g=>g.items||[]).map(s=>`<span class="eu-chip">${esc(s)}</span>`).join("");
   const exp=(cv.work_experience||[]).map(e=>{
-    const dates=esc((e.start_date||"") + " – " + (e.end_date||"Present"));
+    const dates=[e.start_date,e.end_date||"Present"].filter(Boolean).join(" – ");
     const bullets=(e.bullets||[]).map(b=>`<li>${esc(b)}</li>`).join("");
-    return `<div style="margin:10px 0 8px 0">
-      <div><strong>${esc(e.title||"")}</strong> — ${esc(e.company||"")}</div>
-      <div class="line2">${dates}${e.location?` • ${esc(e.location)}`:""}</div>
-      ${e.description?`<div style="margin-top:6px">${esc(e.description)}</div>`:""}
-      ${bullets?`<ul>${bullets}</ul>`:""}</div>`;
+    return `<div class="eu-job"><div class="line1"><strong>${esc(e.title||"")}</strong> — ${esc(e.company||"")}</div>
+    <div class="line2">${esc(dates)}${e.location?` • ${esc(e.location)}`:""}</div>
+    ${e.description?`<div class="desc">${esc(e.description)}</div>`:""}${bullets?`<ul>${bullets}</ul>`:""}</div>`;
   }).join("");
   const edu=(cv.education||[]).map(ed=>{
-    const dates=esc((ed.start_date||"") + (ed.end_date?` – ${ed.end_date}`:""));
-    return `<div style="margin:10px 0 8px 0">
-      <div><strong>${esc(ed.degree||ed.title||"")}</strong> — ${esc(ed.institution||"")}</div>
-      <div class="line2">${dates}${ed.location?` • ${esc(ed.location)}`:""}</div>
-      ${ed.details?`<div style="margin-top:6px">${esc(ed.details)}</div>`:""}</div>`;
+    const dates=[ed.start_date,ed.end_date].filter(Boolean).join(" – ");
+    return `<div class="eu-edu"><div class="line1"><strong>${esc(ed.degree||ed.title||"")}</strong> — ${esc(ed.institution||"")}</div>
+    <div class="line2">${esc(dates)}${ed.location?` • ${esc(ed.location)}`:""}</div>
+    ${ed.details?`<div class="desc">${esc(ed.details)}</div>`:""}</div>`;
   }).join("");
-
-  const photo_b64 = pi.photo_base64 ? `data:image/png;base64,${esc(pi.photo_base64)}` : "";
-  const logoData = (theme.useLogo && $("kyndrylLogoData").value.trim()) ? $("kyndrylLogoData").value.trim() : theme.logoUrl;
-
+  const langs=(cv.languages||[]).map(l=>`<span class="eu-chip">${esc([l.name||l.language||l.lang,l.level].filter(Boolean).join(" — "))}</span>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8"/>
   <style>
-    @page { size:A4; margin:0 } body{margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#0f172a}
-    table.layout{width:100%;border-spacing:0;table-layout:fixed}
-    td.side{width:32%;vertical-align:top;background:${theme.sideBg};color:${theme.sideFg};padding:18px 16px}
-    td.main{width:68%;vertical-align:top;padding:20px 22px}
-    h1{font-size:24px;margin:0 0 2px 0;color:${theme.nameColor}} .sub{color:${theme.titleColor};font-size:13px;margin:4px 0 12px}
-    .sec{margin:14px 0 0} .sec h2{font-size:14px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em;color:${theme.hColor}}
-    .chip{display:inline-block;border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px;border:1px solid ${theme.chipBorder};background:${theme.chipBg};color:${theme.chipFg}}
-    .line2{color:#64748b;font-size:12px;margin:2px 0}
-    ul{margin:6px 0 6px 18px;padding:0}
-    .logo{width:110px}
-    .photo{width:100px;height:100px;border-radius:50%;object-fit:cover}
-    .hr{border:0;border-top:1px solid #e5e7eb;margin:12px 0}
+    @page { size:A4; margin:10mm } body{margin:0;font-family:"DejaVu Sans",Arial,Helvetica,sans-serif;font-size:12px;color:#0f172a}
+    .eu-root{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
+    .eu-side{background:${'var(--side)'};border-right:1px solid #e5e7eb;padding:22px}
+    .eu-main{padding:22px 26px} .eu-name{font-size:26px;font-weight:800;margin:0} .eu-title{font-size:13px;color:#475569;margin-top:4px}
+    .eu-kv{display:grid;grid-template-columns:22px 1fr;gap:10px;margin:6px 0} .ico{width:22px;height:22px;border-radius:6px;background:#e2e8f0;display:flex;align-items:center;justify-content:center;font-size:12px}
+    .eu-sec{margin-top:16px} .eu-sec h2{font-size:14px;font-weight:800;margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em}
+    .eu-chip{display:inline-block;background:#eef2ff;color:#3730a3;border:1px solid #e0e7ff;border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}
+    .eu-job{margin:12px 0 10px} .line2{color:#64748b;font-size:12px;margin-top:2px} .desc{margin-top:6px} .eu-job ul{margin:6px 0 0 18px}
+    .hr{height:1px;background:linear-gradient(90deg,#e5e7eb 60%,transparent 0) repeat-x;background-size:8px 1px;margin:14px 0}
   </style></head>
-  <body>
-  <table class="layout"><tr>
-    <td class="side">
-      ${photo_b64 ? `<div style="text-align:center;margin-bottom:10px"><img class="photo" src="${photo_b64}" alt="Profile"/></div>` : ``}
-      <h1>${name}</h1>
-      ${role?`<div class="sub">${role}</div>`:""}
-      ${location?`<div class="sub" style="margin-top:0">${location}</div>`:""}
-      ${languages.length?`<div class="sec"><h2>${theme.langLabel}</h2><ul style="list-style:none;margin-left:0">${languages.map(l=>`<li>${l}</li>`).join("")}</ul></div>`:""}
-      ${theme.useLogo?`<div style="text-align:center;margin-top:16px"><img class="logo" src="${esc(logoData)}" alt="Logo"/></div>`:""}
-    </td>
-    <td class="main">
-      ${summary?`<div class="sec"><h2>${theme.aboutLabel}</h2><div>${summary}</div></div><hr class="hr"/>`:""}
-      ${exp?`<div class="sec"><h2>${theme.expLabel}</h2>${exp}</div>`:""}
-      ${skills?`<div class="sec"><h2>${theme.skillsLabel}</h2><div>${skills}</div></div>`:""}
-      ${edu?`<div class="sec"><h2>${theme.eduLabel}</h2>${edu}</div>`:""}
-    </td>
-  </tr></table>
-  </body></html>`;
+  <body><div class="eu-root">
+    <aside class="eu-side">
+      <h1 class="eu-name">${full}</h1>${title?`<div class="eu-title">${title}</div>`:""}
+      <div>${contacts.map(c=>`<div class="eu-kv"><div class="ico">${esc(c.ico)}</div><div>${esc(c.txt)}</div></div>`).join("")}</div>
+      ${skills?`<div class="eu-sec"><h2>Skills</h2><div>${skills}</div></div>`:""}
+      ${langs?`<div class="eu-sec"><h2>Languages</h2><div>${langs}</div></div>`:""}
+    </aside>
+    <main class="eu-main">
+      ${(cv.summary||pi.summary)?`<section class="eu-sec"><h2>About Me</h2><div>${esc(cv.summary||pi.summary||"")}</div></section><div class="hr"></div>`:""}
+      ${exp?`<section class="eu-sec"><h2>Work Experience</h2>${exp}</section>`:""}
+      ${edu?`<section class="eu-sec"><h2>Education & Training</h2>${edu}</section>`:""}
+    </main>
+  </div></body></html>`;
 }
-function tpl_europass(cv){
-  const theme = {
-    sideBg:"#F8FAFC", sideFg:"#0F172A", nameColor:"#0F172A", titleColor:"#475569", hColor:"#0F172A",
-    chipBg:"#EEF2FF", chipFg:"#3730A3", chipBorder:"#E0E7FF",
-    langLabel:"Languages", aboutLabel:"About Me", expLabel:"Work Experience", skillsLabel:"Skills", eduLabel:"Education & Training",
-    useLogo:false, logoUrl:""
-  };
-  return euroLikeTemplate(cv, theme);
-}
-function tpl_kyndryl(cv){
-  const theme = {
-    sideBg:"#FF462D", sideFg:"#FFFFFF", nameColor:"#FFFFFF", titleColor:"#FFFFFF", hColor:"#FFFFFF",
-    chipBg:"#FFFFFF", chipFg:"#FF462D", chipBorder:"#FFFFFF",
-    langLabel:"LANGUAGES", aboutLabel:"ABOUT ME", expLabel:"PREVIOUS ROLES", skillsLabel:"SKILLS", eduLabel:"EDUCATION",
-    useLogo:true, logoUrl:"https://upload.wikimedia.org/wikipedia/commons/7/73/Kyndryl_logo.svg"
-  };
-  return euroLikeTemplate(cv, theme);
-}
-function renderTemplate(name, cv){
-  switch((name||"europass").toLowerCase()){
-    case "kyndryl": return tpl_kyndryl(cv);
-    case "europass": default: return tpl_europass(cv);
-  }
-}
+
+/* ---------- preview/export orchestrators ---------- */
+function renderTemplate(name, cv){ switch((name||"europass").toLowerCase()){ case "europass": default: return tpl_europass(cv); } }
 function refreshPreview(){ const html = renderTemplate($("templateName").value, collectCV()); $("preview-frame").srcdoc = html; }
 
 function downloadFromUrlToFile(url, filename){
@@ -349,77 +282,36 @@ async function callCvAgentNormalizeOnly(file){
   const dbg=$("extractLog"); dbg.style.display='block'; dbg.textContent='Preparing…';
   const b64=await fileToBase64(file); const kb=Math.round((b64.length*3/4)/1024);
   const payload={ pptx_base64:b64, pptx_name:file.name, mode:"normalize_only" };
-  const url=cvagentUrl();
-  dbg.textContent=`POST ${url}\nfile: ${file.name} (~${kb} KB)\nbody keys: ${Object.keys(payload).join(", ")}`;
+  const url=cvagentUrl(); dbg.textContent=`POST ${url}\nfile: ${file.name} (~${kb} KB)`;
   let resp,text,data;
   try{ resp=await fetch(url,{method:'POST',headers:jsonHeaders(),body:JSON.stringify(payload)}); }
   catch(e){ dbg.textContent+=`\nNetwork error: ${e.message}`; throw new Error(`Network error calling cvagent: ${e.message}`); }
-  text=await resp.text();
-  dbg.textContent+=`\nstatus: ${resp.status}\nresponse head: ${text.slice(0,200)}${text.length>200?'…':''}`;
-  try{ data=JSON.parse(text);}catch{ data={raw:text}; }
-  if(!resp.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${resp.status}`; throw new Error(msg); }
-  if(!data || !(data.cv || data.normalized || data.result)){ throw new Error("No normalized CV found in response (expected 'cv' field)."); }
-  return (data.cv||data.normalized||data.result);
+  text=await resp.text(); try{ data=JSON.parse(text);}catch{ data={raw:text}; }
+  dbg.textContent+=`\nstatus: ${resp.status}`; if(!resp.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${resp.status}`; dbg.textContent+=`\nerror: ${msg}`; throw new Error(msg); }
+  dbg.textContent+=`\n✓ normalize_only OK`; return (data.cv||data.normalized||data.result||data);
 }
 
 /* ---------- EXPORT (via cvagent) ---------- */
 async function exportViaCvAgent(){
-  const cv=collectCV();
-  const template=($("templateName").value||"europass").toLowerCase();
-  const out=computeOutName(); // auto filename with template suffix
-
-  const payload={ file_name: out, template, return:"url", cv };
-  if(template==="kyndryl"){
-    const logoData = $("kyndrylLogoData").value.trim();
-    if(logoData){ payload.kyndryl_logo_data = logoData; }
-  }
-  const url=cvagentUrl();
-  xlog("EXPORT →", url, payload);
+  const cv=collectCV(), out=($("outName").value||"cv.pdf").trim(), template=($("templateName").value||"europass").toLowerCase();
+  const url=cvagentUrl(); const payload={ file_name: out, template, return:"url", cv };
   const res=await fetch(url,{method:'POST',headers:jsonHeaders(),body:JSON.stringify(payload)});
   const text=await res.text(); let data; try{ data=JSON.parse(text);}catch{ data={raw:text}; }
   if(!res.ok){ const msg=(data&&(data.error||data.message))||text||`HTTP ${res.status}`; throw new Error(`cvagent render failed: ${msg}`); }
-  const pdfUrl=data.pdf_url||data.url||data.sas_url||data.link;
-  if(!pdfUrl && data.html){ // safe fallback for debugging
-    const blob = new Blob([data.html],{type:"text/html"});
-    const htmlUrl = URL.createObjectURL(blob);
-    return { pdfUrl: htmlUrl, out: out.replace(/\.pdf$/i,".html"), isHtml:true };
-  }
-  if(!pdfUrl) throw new Error("No pdf_url returned by cvagent/render");
-  return { pdfUrl, out };
+  const pdfUrl=data.pdf_url||data.url||data.sas_url||data.link; if(!pdfUrl) throw new Error("No pdf_url returned by cvagent/render");
+  return pdfUrl;
 }
 
 /* ---------- events ---------- */
-$("pptxFile").addEventListener('change', e=>{
-  const f=e.target.files?.[0];
-  if(f){ currentSourceName=f.name; updateOutName(); }
-});
-
-$("templateName").addEventListener('change', ()=>{
-  updateOutName();
-  refreshPreview();
-});
-
-function busy(b){ $("btnExtract").disabled=b; $("btnExport").disabled=b; }
+$("pptxFile").addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f){ currentSourceName=f.name; $("outName").value=toPdfName(f.name);} });
 
 $("btnExtract").addEventListener('click', async ()=>{
-  const f=$("pptxFile").files[0];
-  $("extractLog").style.display='block';
-  $("extractLog").textContent='';
-  if(!f){ $("extractLog").textContent='Please choose a PPTX first.'; alert('Choose a PPTX first'); return; }
-  busy(true);
-  try{
-    const cv=await callCvAgentNormalizeOnly(f);
-    $("extractLog").textContent += `\n✓ normalize_only OK`;
-    fillForm(cv);
-    $("extractLog").textContent += '\nDone. You can edit below.';
-  }catch(e){
-    $("extractLog").textContent += `\n✗ Error: ${e.message||e}`;
-    alert('Extract error: '+(e.message||e));
-  }finally{ busy(false); }
+  const f=$("pptxFile").files[0]; if(!f){ alert('Choose a PPTX first'); return; }
+  try{ const cv=await callCvAgentNormalizeOnly(f); fillForm(cv); $("extractLog").textContent += '\nDone. You can edit below.'; }
+  catch(e){ alert('Extract error: '+(e.message||e)); }
 });
 
 $("btnLoadSample").addEventListener('click', ()=>{
-  currentSourceName = null; updateOutName();
   fillForm({
     personal_info:{ full_name:'Ada Lovelace', headline:'Computing Pioneer', city:'London', country:'UK', email:'ada@example.com', linkedin:'linkedin.com/in/ada' },
     summary:'Visionary mathematician; wrote the first algorithm intended to be executed by a machine.',
@@ -439,25 +331,18 @@ $("btnRefreshPreview").addEventListener('click', refreshPreview);
 
 $("btnExport").addEventListener('click', async ()=>{
   $("exportStatus").textContent='Rendering…'; $("blobLink").innerHTML=''; $("localLink").innerHTML='';
-  busy(true);
   try{
-    const { pdfUrl, out, isHtml } = await exportViaCvAgent();
-    $("exportStatus").innerHTML='<span class="ok">Done.</span>';
-    $("blobLink").innerHTML=`<a href="${pdfUrl}" target="_blank" rel="noopener">${isHtml?'Open HTML preview':'Open PDF in Blob'}</a>`;
+    const url=await exportViaCvAgent();
+    $("exportStatus").textContent='Done.';
+    $("blobLink").innerHTML=`<a href="${url}" target="_blank" rel="noopener">Open PDF in Blob</a>`;
     const a=document.createElement('a'); a.href='#'; a.className='btn secondary'; a.textContent='Download locally';
-    a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(pdfUrl, out); });
+    a.addEventListener('click', e=>{ e.preventDefault(); downloadFromUrlToFile(url, $("outName").value || 'cv.pdf'); });
     $("localLink").appendChild(a);
-  }catch(e){
-    $("exportStatus").innerHTML='<span class="err">Error</span>';
-    alert(e.message||e);
-  }finally{ busy(false); }
+  }catch(e){ $("exportStatus").textContent='Error'; alert(e.message||e); }
 });
 
 /* auto-fill base when hosted on the Function App */
-window.addEventListener('load', ()=>{
-  try{ if(location.hostname.endsWith('.azurewebsites.net')) $("baseUrl").value = location.origin + '/'; }catch{}
-  updateOutName();
-});
+window.addEventListener('load', ()=>{ try{ if(location.hostname.endsWith('.azurewebsites.net')) $("baseUrl").value = location.origin + '/'; }catch{} });
 </script>
 </body>
 </html>

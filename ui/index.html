@@ -14,17 +14,23 @@
     --line:#e5e7eb;
     --bg:#fff;
     --side:#f8fafc;        /* preview Europass sidebar base (kept as-is) */
+    --header-h: 56px;      /* fixed header height */
   }
 
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;
+    padding-top:var(--header-h); /* space for fixed header */
+  }
 
-  /* Brand bar (added, non-breaking) */
+  /* Brand bar (fixed) */
   .brandbar{
-    display:flex;align-items:center;gap:12px;
-    background:#111; /* charcoal to make the red pop */
-    color:#fff;padding:10px 16px;
-    border-bottom:1px solid #000;
+    position:fixed; inset:0 0 auto 0; height:var(--header-h);
+    display:flex; align-items:center; gap:12px;
+    background:#111; color:#fff; padding:10px 16px;
+    border-bottom:1px solid #000; z-index:1000;
+    box-shadow:0 2px 8px rgba(0,0,0,.12);
   }
   .brandbar .logo{display:flex;align-items:center;gap:10px}
   .brandbar .logo svg{height:20px;width:auto;display:block}
@@ -79,10 +85,10 @@
 </head>
 <body>
 
-<!-- Brand header (added; does not interfere with existing JS) -->
+<!-- Fixed brand header (non-breaking) -->
 <div class="brandbar">
   <div class="logo" aria-label="Kyndryl">
-    <!-- Simple wordmark-style SVG (kept neutral; no external assets) -->
+    <!-- Simple wordmark-style SVG (no external assets) -->
     <svg viewBox="0 0 220 28" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
       <rect width="220" height="28" fill="none"/>
       <text x="0" y="20" font-family="Inter, Arial, Helvetica, sans-serif" font-weight="700" font-size="20" fill="#F9423A">kyndryl</text>

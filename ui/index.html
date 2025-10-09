@@ -5,20 +5,92 @@
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>CV Agent — Extract • Edit • Export</title>
 <style>
-  :root{ --brand:#0F62FE; --ink:#0f172a; --muted:#64748b; --line:#e5e7eb; --bg:#fff; --side:#f8fafc; }
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial}
-  .wrap{max-width:1140px;margin:28px auto 80px;padding:0 16px} h1{font-size:22px;margin:0 0 8px} p{margin:0 0 12px;color:var(--muted)}
-  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
-  input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font:inherit}
-  textarea{min-height:90px} .btn{appearance:none;border:0;background:var(--brand);color:#0f172a;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
-  .btn.secondary{background:#1118270d;color:#111827} .btn:disabled{opacity:.6;cursor:not-allowed} .toolbar{display:flex;flex-wrap:wrap;gap:8px}
-  .list{display:grid;gap:12px} .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
-  .log{background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;padding:12px;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap}
+  /* ===== Kyndryl theme (non-breaking) ===== */
+  :root{
+    --brand:#F9423A;       /* Kyndryl red */
+    --brand-ink:#0f172a;   /* Deep ink text */
+    --ink:#0f172a;
+    --muted:#64748b;
+    --line:#e5e7eb;
+    --bg:#fff;
+    --side:#f8fafc;        /* preview Europass sidebar base (kept as-is) */
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial}
+
+  /* Brand bar (added, non-breaking) */
+  .brandbar{
+    display:flex;align-items:center;gap:12px;
+    background:#111; /* charcoal to make the red pop */
+    color:#fff;padding:10px 16px;
+    border-bottom:1px solid #000;
+  }
+  .brandbar .logo{display:flex;align-items:center;gap:10px}
+  .brandbar .logo svg{height:20px;width:auto;display:block}
+  .brandbar .tag{margin-left:auto;font-size:12px;opacity:.8}
+
+  .wrap{max-width:1140px;margin:28px auto 80px;padding:0 16px}
+  h1{font-size:22px;margin:0 0 8px}
+  p{margin:0 0 12px;color:var(--muted)}
+
+  .card{
+    background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0;
+    box-shadow:0 1px 2px rgba(0,0,0,.04)
+  }
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+
+  input,textarea,select{
+    width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font:inherit
+  }
+  textarea{min-height:90px}
+
+  /* Buttons — brand-forward but non-breaking */
+  .btn{
+    appearance:none;border:0;background:var(--brand);color:#fff;
+    padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer
+  }
+  .btn:hover{filter:brightness(.98)}
+  .btn.secondary{
+    background:#1118270d;color:#111827;border:1px solid #eceff3
+  }
+  .btn.secondary:hover{background:#11182714}
+
+  /* Subtle branded accents */
+  .card > div[style*="font-weight:700"]{ /* section card titles */
+    border-left:4px solid var(--brand);
+    padding-left:10px;
+  }
+
+  .list{display:grid;gap:12px}
+  .item{border:1px dashed var(--line);border-radius:10px;padding:12px}
+
+  .log{
+    background:#0b1020;color:#d1d5db;font:12px/1.5 ui-monospace,Menlo,Consolas;
+    padding:12px;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap
+  }
   #preview-frame{width:100%;height:900px;border:1px solid var(--line);border-radius:12px}
+
+  /* Links inside export area */
+  a{color:var(--brand);text-decoration:none}
+  a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
+
+<!-- Brand header (added; does not interfere with existing JS) -->
+<div class="brandbar">
+  <div class="logo" aria-label="Kyndryl">
+    <!-- Simple wordmark-style SVG (kept neutral; no external assets) -->
+    <svg viewBox="0 0 220 28" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+      <rect width="220" height="28" fill="none"/>
+      <text x="0" y="20" font-family="Inter, Arial, Helvetica, sans-serif" font-weight="700" font-size="20" fill="#F9423A">kyndryl</text>
+    </svg>
+  </div>
+  <div class="tag">Internal CV Agent</div>
+</div>
+
 <div class="wrap">
   <h1>CV Agent</h1>
   <p>Upload PPTX → extract & normalize → edit → export a pixel-perfect PDF.</p>
@@ -34,8 +106,7 @@
       <div><label>Template</label>
         <select id="templateName">
           <option value="europass" selected>europass</option>
-          <!-- add more templates later -->
-          <option value="kyndryl">Kyndryl (red sidebar)</option><!-- << added -->
+          <option value="kyndryl">Kyndryl (red sidebar)</option>
         </select>
       </div>
     </div>
@@ -272,14 +343,14 @@ function renderTemplate(name, cv){
   // keep europass default behavior
   const t = (name||"europass").toLowerCase();
   if (t === "kyndryl") {
-    // recolor sidebar to Kyndryl red + white text; keep main column dark on white
+    // recolor sidebar to Kyndryl red; keep main column dark on white (black text)
     let html = tpl_europass(cv)
-      .replace(/background:var\(--side\)/g, 'background:#F9423A;color:#0f172a;border-right:1px solid #a60f24');
-    // sidebar icons to white-ish
-    html = html.replace(/background:#e2e8f0/g, 'background:rgba(255,255,255,.18);color:#0f172a');
-    // chips in sidebar to white-on-red
-    html = html.replace(/\.eu-chip\{[^}]*\}/, '.eu-chip{display:inline-block;background:rgba(255,255,255,.18);color:#0f172a;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}');
-    return html; // .eu-main remains color:#0f172a
+      .replace(/background:var\(--side\)/g, 'background:#F9423A;border-right:1px solid #a60f24');
+    // sidebar icons: subtle translucent tiles (keep text black in main)
+    html = html.replace(/background:#e2e8f0/g, 'background:rgba(255,255,255,.2)');
+    // chips in sidebar tuned for red background (still readable)
+    html = html.replace(/\.eu-chip\{[^}]*\}/, '.eu-chip{display:inline-block;background:rgba(255,255,255,.15);color:#0f172a;border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:3px 10px;margin:3px 6px 0 0;font-size:11px}');
+    return html;
   }
   return tpl_europass(cv);
 }

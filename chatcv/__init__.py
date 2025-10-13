@@ -6,7 +6,7 @@ import azure.functions as func
 import requests
 
 from jinja2 import Environment, BaseLoader, select_autoescape
-from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
+from azure.storage.blob import BlobServiceClient
 from azure.storage.blob._shared.base_client import parse_connection_str
 
 # ========== ENV HELPERS (match your normalize style) ==========
@@ -52,14 +52,42 @@ if not CONN_STR:
 
 _bsc = BlobServiceClient.from_connection_string(CONN_STR)
 
+# Parse connection string and capture SAS if present
+def _kv_from_conn_str(cs: str) -> dict:
+    out = {}
+    for part in cs.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+cs_kv = _kv_from_conn_str(CONN_STR)
+
 ACCOUNT_NAME = None
 ACCOUNT_KEY  = None
+CONN_SAS     = (cs_kv.get("SharedAccessSignature") or cs_kv.get("SharedAccessSig") or "").lstrip("?")
+ACCOUNT_URL  = cs_kv.get("BlobEndpoint") or _bsc.url.rstrip("/")
+
 try:
     parsed = parse_connection_str(CONN_STR)
+    # parse_connection_str returns a dict-like with account parts when AccountKey is present
     ACCOUNT_NAME = parsed.get("account_name")
     ACCOUNT_KEY  = parsed.get("account_key")
 except Exception as e:
-    logging.error(f"[chatcv] parse_connection_str failed: {e}")
+    logging.warning(f"[chatcv] parse_connection_str failed (likely SAS-only connection string): {e}")
+
+# Explicit override wins (Linux env is case-sensitive)
+env_name = os.environ.get("STORAGE_ACCOUNT_NAME")
+env_key  = os.environ.get("STORAGE_ACCOUNT_KEY")
+if env_name and env_key:
+    ACCOUNT_NAME, ACCOUNT_KEY = env_name, env_key
+
+if ACCOUNT_KEY:
+    logging.info("[chatcv] Storage auth: using AccountKey (can mint SAS).")
+elif CONN_SAS:
+    logging.info("[chatcv] Storage auth: using SharedAccessSignature from connection string.")
+else:
+    logging.error("[chatcv] No AccountKey or SAS available; blob SAS URL generation will fail.")
 
 # ========== HTTP/PIPELINE HELPERS ==========
 def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
@@ -86,23 +114,34 @@ def _post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT_SEC):
     except Exception as e:
         return 0, None, f"Network error calling {url}: {e}"
 
-def _blob_sas_url(container:str, blob_name:str, minutes:int=SAS_MINUTES)->str:
-    if not (ACCOUNT_NAME and ACCOUNT_KEY):
-        raise RuntimeError("Missing storage key for SAS")
+def _blob_sas_url(container: str, blob_name: str, minutes: int = SAS_MINUTES) -> str:
+    """
+    Return a signed URL for the blob.
+    - If we have an AccountKey, mint a fresh short-lived SAS.
+    - Otherwise, if the connection string already contains a SAS, reuse it.
+    """
     bc = _bsc.get_blob_client(container, blob_name)
     if not bc.exists():
         raise FileNotFoundError(f"Blob not found: {blob_name}")
-    account_url = _bsc.url.rstrip("/")
-    blob_url = f"{account_url}/{container}/{blob_name}"
-    sas = generate_blob_sas(
-        account_name=ACCOUNT_NAME,
-        container_name=container,
-        blob_name=blob_name,
-        account_key=ACCOUNT_KEY,
-        permission=BlobSasPermissions(read=True),
-        expiry=datetime.now(timezone.utc) + timedelta(minutes=minutes),
-    )
-    return f"{blob_url}?{sas}"
+
+    base_url = f"{ACCOUNT_URL}/{container}/{blob_name}"
+
+    if ACCOUNT_KEY:
+        from azure.storage.blob import generate_blob_sas, BlobSasPermissions
+        sas = generate_blob_sas(
+            account_name=ACCOUNT_NAME,
+            container_name=container,
+            blob_name=blob_name,
+            account_key=ACCOUNT_KEY,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(timezone.utc) + timedelta(minutes=minutes),
+        )
+        return f"{base_url}?{sas}"
+
+    if CONN_SAS:
+        return f"{base_url}?{CONN_SAS}"
+
+    raise RuntimeError("No AccountKey or SharedAccessSignature available to build SAS")
 
 def list_recent_cv_blobs(limit:int=60):
     cc = _bsc.get_container_client(INCOMING_CONTAINER)
@@ -111,7 +150,7 @@ def list_recent_cv_blobs(limit:int=60):
     blobs.sort(key=lambda b: b.last_modified or datetime(2000,1,1,tzinfo=timezone.utc), reverse=True)
     return blobs[:limit]
 
-# ========== TEMPLATES (exactly like your cvagent) ==========
+# ========== TEMPLATES (same as your exporter) ==========
 _EUROPASS_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"/>
 <title>{{ person.full_name or 'Curriculum Vitae' }}</title>
@@ -349,7 +388,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         raw_cv = d1.get("raw") or d1.get("raw3") or d1
 
-        # Normalize (your existing normalizer)
+        # Normalize (your existing normalizer service)
         normalize_url = _build_url(req, CVNORMALIZE_PATH, CVNORMALIZE_KEY)
         s2, d2, r2 = _post_json(normalize_url, {"raw": raw_cv, "pptx_name": best})
         if s2 != 200 or not isinstance(d2, dict):
@@ -382,7 +421,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as e:
         logging.exception("chatcv fatal")
-        # Friendly message instead of HTTP 500 so UI stays happy
         return func.HttpResponse(json.dumps({
             "person_name": person, "template": template,
             "message": f"Something went wrong while generating the PDF. Details: {str(e)}"

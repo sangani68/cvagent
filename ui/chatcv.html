@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CV Chat</title>
+<style>
+  :root{ --brand:#F9423A; --ink:#0f172a; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --header-h:56px; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;padding-top:var(--header-h)}
+  .brandbar{position:fixed;inset:0 0 auto 0;height:var(--header-h);display:flex;align-items:center;gap:12px;background:#111;color:#fff;padding:10px 16px;border-bottom:1px solid #000;z-index:10}
+  .brandbar .logo svg{height:20px}
+  .wrap{max-width:960px;margin:24px auto;padding:0 16px}
+  .panel{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff}
+  .top{padding:12px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .top label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font:inherit}
+  .chat{height:70vh;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+  .msg{max-width:80%;padding:10px 12px;border-radius:12px;border:1px solid var(--line)}
+  .me{align-self:flex-end;background:#1118270a}
+  .bot{align-self:flex-start;background:#fff}
+  .foot{display:flex;gap:8px;border-top:1px solid var(--line);padding:10px}
+  textarea{flex:1;min-height:46px;max-height:120px;resize:vertical;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font:inherit}
+  .btn{background:var(--brand);color:#fff;border:0;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer}
+  a{color:var(--brand);text-decoration:none} a:hover{text-decoration:underline}
+  .hint{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="brandbar">
+  <div class="logo" aria-label="Kyndryl">
+    <svg viewBox="0 0 220 28" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+      <rect width="220" height="28" fill="none"/>
+      <text x="0" y="20" font-family="Inter, Arial, Helvetica, sans-serif" font-weight="700" font-size="20" fill="#F9423A">kyndryl</text>
+    </svg>
+  </div>
+  <div style="margin-left:auto;opacity:.8;font-size:12px">CV Chat</div>
+</div>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="top">
+      <div>
+        <label>Function App Base URL</label>
+        <input id="baseUrl" value="/" />
+        <div class="hint">Same origin → keep “/”. Else use your Function URL with trailing slash.</div>
+      </div>
+      <div>
+        <label>Host/Function Key (if required)</label>
+        <input id="funcKey" placeholder="paste key if authLevel=function"/>
+        <div class="hint">Appends <code>?code=...</code></div>
+      </div>
+    </div>
+
+    <div id="chat" class="chat" aria-live="polite"></div>
+
+    <div class="foot">
+      <textarea id="prompt" placeholder='e.g., "Give CV of Ada Lovelace in europass template"'></textarea>
+      <button id="send" class="btn">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const chat = $("chat");
+function addMsg(text, who="bot"){
+  const div = document.createElement("div");
+  div.className = "msg " + (who==="me"?"me":"bot");
+  div.innerHTML = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+function buildBase(){ const v = $("baseUrl").value.trim() || "/"; return v.endsWith("/") ? v : v + "/"; }
+function withKey(url){ const k = $("funcKey").value.trim(); return k ? url + (url.includes("?")?"&":"?") + "code=" + encodeURIComponent(k) : url; }
+function chatcvUrl(){ return withKey(buildBase() + "api/chatcv"); }
+
+async function ask(){
+  const p = $("prompt").value.trim();
+  if(!p){ return; }
+  addMsg(p, "me");
+  $("prompt").value = "";
+  try{
+    const res = await fetch(chatcvUrl(), {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ prompt: p, return: "url" })
+    });
+    const t = await res.text();
+    let j; try{ j = JSON.parse(t); }catch{ j = {raw:t}; }
+    if(!res.ok){
+      const msg = (j && (j.error||j.message)) || t || ("HTTP " + res.status);
+      addMsg("❌ " + msg, "bot"); return;
+    }
+    const { person_name, template, blob_name, pdf_url, message } = j;
+    let html = `<div><div><strong>Template:</strong> ${template || "europass"}</div>`;
+    if(person_name) html += `<div><strong>Person:</strong> ${person_name}</div>`;
+    if(blob_name) html += `<div><strong>Source:</strong> ${blob_name}</div>`;
+    if(pdf_url) html += `<div style="margin-top:6px"><a href="${pdf_url}" target="_blank" rel="noopener">Open generated PDF</a></div>`;
+    if(message) html += `<div class="hint" style="margin-top:6px">${message}</div>`;
+    html += `</div>`;
+    addMsg(html, "bot");
+  }catch(e){
+    addMsg("❌ " + (e.message||e), "bot");
+  }
+}
+
+$("send").addEventListener("click", ask);
+$("prompt").addEventListener("keydown", e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); ask(); }});
+window.addEventListener('load', ()=>{ try{ if(location.hostname.endsWith('.azurewebsites.net')) $("baseUrl").value = location.origin + '/'; }catch{} });
+</script>
+</body>
+</html>

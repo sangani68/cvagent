@@ -1,5 +1,7 @@
 import os, json, logging, re
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple, List
+
 import azure.functions as func
 import requests
 
@@ -7,27 +9,43 @@ from jinja2 import Environment, BaseLoader, select_autoescape
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from azure.storage.blob._shared.base_client import parse_connection_str
 
-# ----------------------------------------------------
-# Config (reuses your working envs)
-# ----------------------------------------------------
-BASE_URL = (os.environ.get("DOWNSTREAM_BASE_URL")
-            or os.environ.get("FUNCS_BASE_URL") or "").rstrip("/")
+# ========== ENV HELPERS (match your normalize style) ==========
+def _get(name, *aliases, default=None):
+    for k in (name, *aliases):
+        v = os.getenv(k)
+        if v: return v
+    return default
 
-PPTXEXTRACT_PATH = os.environ.get("PPTXEXTRACT_PATH", "/api/pptxextract")
-CVNORMALIZE_PATH = os.environ.get("CVNORMALIZE_PATH", "/api/cvnormalize")
-RENDER_PATH      = os.environ.get("RENDER_PATH",      "/api/renderpdf_html")
+# ----- AOAI (Azure OpenAI) -----
+from openai import AzureOpenAI
+AOAI_ENDPOINT    = _get("AOAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT")
+AOAI_KEY         = _get("AOAI_KEY", "AZURE_OPENAI_API_KEY")
+AOAI_DEPLOYMENT  = _get("AOAI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT", default="gpt-4.1")
+AOAI_API_VERSION = _get("AOAI_API_VERSION", "AZURE_OPENAI_API_VERSION", default="2024-10-21")
 
-PPTXEXTRACT_KEY  = os.environ.get("PPTXEXTRACT_KEY", "")
-CVNORMALIZE_KEY  = os.environ.get("CVNORMALIZE_KEY", "")
-RENDER_KEY       = os.environ.get("RENDER_KEY", "")
+_client: Optional[AzureOpenAI] = None
+def client() -> AzureOpenAI:
+    global _client
+    if _client is None:
+        if not (AOAI_ENDPOINT and AOAI_KEY):
+            raise RuntimeError("AOAI not configured (set AOAI_ENDPOINT and AOAI_KEY)")
+        _client = AzureOpenAI(azure_endpoint=AOAI_ENDPOINT, api_key=AOAI_KEY, api_version=AOAI_API_VERSION)
+    return _client
 
-HTTP_TIMEOUT_SEC   = int(os.environ.get("HTTP_TIMEOUT_SEC", "180"))
-INCOMING_CONTAINER = os.environ.get("INCOMING_CONTAINER", "incoming")
-SAS_MINUTES        = int(os.environ.get("SAS_MINUTES", "120"))
+# ----- Downstream (reuse your working envs) -----
+BASE_URL          = (_get("DOWNSTREAM_BASE_URL", "FUNCS_BASE_URL", default="") or "").rstrip("/")
+PPTXEXTRACT_PATH  = _get("PPTXEXTRACT_PATH", default="/api/pptxextract")
+CVNORMALIZE_PATH  = _get("CVNORMALIZE_PATH", default="/api/cvnormalize")
+RENDER_PATH       = _get("RENDER_PATH", default="/api/renderpdf_html")
+PPTXEXTRACT_KEY   = _get("PPTXEXTRACT_KEY", default="")
+CVNORMALIZE_KEY   = _get("CVNORMALIZE_KEY", default="")
+RENDER_KEY        = _get("RENDER_KEY", default="")
 
-# ----------------------------------------------------
-# Storage
-# ----------------------------------------------------
+HTTP_TIMEOUT_SEC   = int(_get("HTTP_TIMEOUT_SEC", default="180"))
+INCOMING_CONTAINER = _get("INCOMING_CONTAINER", default="incoming")
+SAS_MINUTES        = int(_get("SAS_MINUTES", default="120"))
+
+# ========== STORAGE ==========
 CONN_STR = os.environ.get("AzureWebJobsStorage")
 if not CONN_STR:
     raise RuntimeError("AzureWebJobsStorage not set")
@@ -43,36 +61,7 @@ try:
 except Exception as e:
     logging.error(f"[chatcv] parse_connection_str failed: {e}")
 
-# ----------------------------------------------------
-# OpenAI optional (safe fallback if missing)
-# ----------------------------------------------------
-USE_AZURE_OPENAI = bool(os.environ.get("AZURE_OPENAI_ENDPOINT") and os.environ.get("AZURE_OPENAI_API_KEY"))
-MODEL_NAME = os.environ.get("CHATCV_MODEL", "gpt-4.1")
-OAI_AVAILABLE = False
-oai = None
-try:
-    if USE_AZURE_OPENAI:
-        from openai import AzureOpenAI
-        oai = AzureOpenAI(
-            api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-06-01"),
-            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        )
-        OAI_AVAILABLE = True
-    else:
-        # Standard OpenAI
-        from openai import OpenAI
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if api_key:
-            oai = OpenAI(api_key=api_key)
-            OAI_AVAILABLE = True
-except Exception as e:
-    logging.warning(f"[chatcv] OpenAI not available: {e}")
-    OAI_AVAILABLE = False
-
-# ----------------------------------------------------
-# Helpers
-# ----------------------------------------------------
+# ========== HTTP/PIPELINE HELPERS ==========
 def _build_url(req: func.HttpRequest, path: str, key: str = "") -> str:
     if path.startswith("http"):
         url = path
@@ -115,9 +104,14 @@ def _blob_sas_url(container:str, blob_name:str, minutes:int=SAS_MINUTES)->str:
     )
     return f"{blob_url}?{sas}"
 
-# ----------------------------------------------------
-# Templates (same visual as your cvagent)
-# ----------------------------------------------------
+def list_recent_cv_blobs(limit:int=60):
+    cc = _bsc.get_container_client(INCOMING_CONTAINER)
+    blobs = list(cc.list_blobs())
+    blobs = [b for b in blobs if str(b.name).lower().endswith((".pptx",".pptm",".ppsx",".ppt",".odp",".potx",".potm"))]
+    blobs.sort(key=lambda b: b.last_modified or datetime(2000,1,1,tzinfo=timezone.utc), reverse=True)
+    return blobs[:limit]
+
+# ========== TEMPLATES (exactly like your cvagent) ==========
 _EUROPASS_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"/>
 <title>{{ person.full_name or 'Curriculum Vitae' }}</title>
@@ -189,6 +183,7 @@ _EUROPASS_HTML = """<!doctype html>
 </body></html>
 """
 
+# Kyndryl variant: red sidebar; main stays black on white
 _KYNDRYL_HTML = _EUROPASS_HTML \
     .replace('#f8fafc', '#F9423A') \
     .replace('border-right:1px solid #e5e7eb', 'border-right:1px solid #a60f24')
@@ -216,133 +211,124 @@ def _html_from_cv(cv: dict, template_name: str = "europass") -> str:
     }
     return j.render(**model)
 
-# ----------------------------------------------------
-# GPT helpers (all try/except; graceful degradation)
-# ----------------------------------------------------
-INTENT_SCHEMA = {
-  "type":"object",
-  "properties":{
-    "person_name":{"type":"string"},
-    "template":{"type":"string","enum":["europass","kyndryl"]}
-  },
-  "required":["person_name"],
-  "additionalProperties":False
+# ========== GPT 4.1 JSON Schemas (AOAI chat.completions) ==========
+INTENT_SCHEMA: Dict[str, Any] = {
+    "type":"object","additionalProperties":False,
+    "properties":{
+        "person_name":{"type":"string"},
+        "template":{"type":"string","enum":["europass","kyndryl"]}
+    },
+    "required":["person_name"]
+}
+BLOB_PICK_SCHEMA: Dict[str, Any] = {
+    "type":"object","additionalProperties":False,
+    "properties":{"best":{"type":"string"}},
+    "required":["best"]
 }
 
-STOP = {"cv","resume","give","show","for","of","in","the","a","an","template","please","generate","make","create"}
+SYSTEM_INTENT = (
+    "Extract the person_name and the template from the user's request. "
+    "Allowed template values: europass, kyndryl. "
+    "If the template is missing, default to europass. "
+    "Return ONLY JSON."
+)
 
-def _fallback_parse(prompt:str):
-    p = re.sub(r"[^a-zA-Z0-9\s._-]+"," ",prompt or "").strip()
-    toks = [w for w in p.split() if w.lower() not in STOP]
-    name = " ".join(toks[:3]).strip() if toks else ""
-    template = "kyndryl" if "kyndryl" in (prompt or "").lower() else ("europass" if "europass" in (prompt or "").lower() else "europass")
-    return name, template
+SYSTEM_BLOB_PICK = (
+    "You select the single best CV filename for the given person_name from the list. "
+    "Return ONLY JSON with the filename in the 'best' field. If nothing matches, return 'NONE'."
+)
 
-def parse_intent_with_gpt41(prompt:str):
-    if not (OAI_AVAILABLE and oai):
-        return _fallback_parse(prompt)
-    try:
-        resp = oai.responses.create(
-            model=MODEL_NAME,
-            response_format={"type":"json_schema","json_schema":{"name":"intent","schema":INTENT_SCHEMA}},
-            input=f'Extract person_name and template (europass/kyndryl). Default template=europass.\nUser: {prompt}'
-        )
-        # Robust: prefer output_text; fallback to content JSON if SDK differs
-        text = getattr(resp, "output_text", None)
-        if not text:
-            # Try to navigate content if output_text missing
-            text = resp.output[0].content[0].text  # may raise; caught below
-        data = json.loads(text)
-        person = (data.get("person_name") or "").strip()
-        template = (data.get("template") or "europass").strip().lower()
-        if template not in ("europass","kyndryl"):
-            template = "europass"
-        if not person:
-            raise ValueError("empty name from model")
-        return person, template
-    except Exception as e:
-        logging.warning(f"[chatcv] intent parse via GPT failed; using fallback. err={e}")
-        return _fallback_parse(prompt)
+def parse_intent_with_llm(prompt: str) -> Tuple[str,str]:
+    """Returns (person_name, template|europass). Uses AOAI chat.completions with JSON schema."""
+    resp = client().chat.completions.create(
+        model=AOAI_DEPLOYMENT, temperature=0,
+        response_format={"type":"json_schema","json_schema":{"name":"Intent","schema":INTENT_SCHEMA}},
+        messages=[
+            {"role":"system","content":SYSTEM_INTENT},
+            {"role":"user","content":prompt}
+        ]
+    )
+    content = resp.choices[0].message.content
+    data = json.loads(content)
+    person = (data.get("person_name") or "").strip()
+    template = (data.get("template") or "europass").strip().lower()
+    if template not in ("europass","kyndryl"):
+        template = "europass"
+    return person, template
 
-def list_recent_cv_blobs(limit:int=50):
-    cc = _bsc.get_container_client(INCOMING_CONTAINER)
-    blobs = list(cc.list_blobs())
-    blobs = [b for b in blobs if str(b.name).lower().endswith((".pptx",".pptm",".ppsx",".ppt",".odp",".potx",".potm"))]
-    blobs.sort(key=lambda b: b.last_modified or datetime(2000,1,1,tzinfo=timezone.utc), reverse=True)
-    return blobs[:limit]
-
-def choose_best_blob_fallback(person_name:str, blob_names:list[str])->str:
-    tokens = [t for t in re.split(r"[\s._-]+", (person_name or "").lower()) if t]
-    best, score = None, -1
-    for b in blob_names:
-        nm = b.lower()
-        sc = sum(1 for t in tokens if t in nm)
-        if sc > score:
-            best, score = b, sc
+def choose_best_blob_with_llm(person_name: str, candidates: List[str]) -> str:
+    """Returns a single filename or 'NONE'."""
+    payload = {"person_name": person_name, "candidates": candidates}
+    resp = client().chat.completions.create(
+        model=AOAI_DEPLOYMENT, temperature=0,
+        response_format={"type":"json_schema","json_schema":{"name":"BlobPick","schema":BLOB_PICK_SCHEMA}},
+        messages=[
+            {"role":"system","content":SYSTEM_BLOB_PICK},
+            {"role":"user","content":json.dumps(payload, ensure_ascii=False)}
+        ]
+    )
+    content = resp.choices[0].message.content
+    data = json.loads(content)
+    best = (data.get("best") or "").strip()
     return best or "NONE"
 
-def choose_best_blob_gpt(person_name:str, blob_names:list[str])->str:
-    if not (OAI_AVAILABLE and oai):
-        return choose_best_blob_fallback(person_name, blob_names)
-    try:
-        names = "\n".join(f"- {b}" for b in blob_names)
-        prompt = f"""Select the best CV file name for person "{person_name}".
-Choose exactly one filename from the list, or return "NONE" if nothing matches.
-List:
-{names}
-Return ONLY JSON: {{ "best": "<filename or NONE>" }}"""
-        resp = oai.responses.create(
-            model=MODEL_NAME,
-            response_format={"type":"json_object"},
-            input=prompt
-        )
-        text = getattr(resp, "output_text", None) or "{}"
-        data = json.loads(text)
-        best = (data.get("best") or "NONE").strip()
-        if best == "NONE":
-            return choose_best_blob_fallback(person_name, blob_names)
-        return best
-    except Exception as e:
-        logging.warning(f"[chatcv] blob choose via GPT failed; using fallback. err={e}")
-        return choose_best_blob_fallback(person_name, blob_names)
-
-# ----------------------------------------------------
-# HTTP function
-# ----------------------------------------------------
+# ========== HTTP TRIGGER ==========
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("chatcv triggered")
+    if req.method != "POST":
+        return func.HttpResponse("POST only", status_code=405)
+
     try:
         body = req.get_json()
-    except Exception:
-        return func.HttpResponse(json.dumps({"error": "Invalid JSON"}), status_code=400, mimetype="application/json")
+    except ValueError:
+        return func.HttpResponse(json.dumps({"error":"Invalid JSON"}), status_code=400, mimetype="application/json")
 
-    prompt = (body.get("prompt") or "").trim() if hasattr(str, "trim") else (body.get("prompt") or "").strip()
+    prompt = (body.get("prompt") or "").strip()
     if not prompt:
         return func.HttpResponse(json.dumps({"error":"Missing 'prompt'"}), status_code=400, mimetype="application/json")
 
-    # 1) Intent (person/template)
-    person, template = parse_intent_with_gpt41(prompt)
+    # 1) Intent via AOAI
+    try:
+        person, template = parse_intent_with_llm(prompt)
+    except Exception as e:
+        logging.exception("intent parse failed")
+        return func.HttpResponse(json.dumps({
+            "message":"I couldn’t understand the request. Try: “Give CV of Ada Lovelace in kyndryl template”.",
+            "details": f"intent-error: {e}"
+        }), status_code=200, mimetype="application/json")
+
     if not person:
         return func.HttpResponse(json.dumps({
             "message":"I couldn’t figure out the person’s name. Try: “Give CV of Ada Lovelace in europass template”."
         }), status_code=200, mimetype="application/json")
 
-    # 2) Find a candidate in 'incoming'
+    # 2) Find best blob from 'incoming' via AOAI
     try:
         recent = list_recent_cv_blobs(limit=60)
+        names = [b.name for b in recent]
     except Exception as e:
-        logging.exception("Failed to list blobs")
+        logging.exception("blob list failed")
         return func.HttpResponse(json.dumps({
+            "person_name": person, "template": template,
             "message": "I couldn’t access the 'incoming' container. Please check storage permissions/connection string.",
             "details": str(e)
         }), status_code=200, mimetype="application/json")
 
-    names = [b.name for b in recent]
-    best = choose_best_blob_gpt(person, names)
+    if not names:
+        return func.HttpResponse(json.dumps({
+            "person_name": person, "template": template,
+            "message": f"No PPTX files found in '{INCOMING_CONTAINER}'. Please upload the CV PPTX and try again."
+        }), status_code=200, mimetype="application/json")
+
+    try:
+        best = choose_best_blob_with_llm(person, names)
+    except Exception as e:
+        logging.exception("blob pick failed")
+        best = "NONE"
+
     if not best or best == "NONE":
         return func.HttpResponse(json.dumps({
-            "person_name": person,
-            "template": template,
+            "person_name": person, "template": template,
             "message": f"I looked in '{INCOMING_CONTAINER}' but couldn’t find a matching PPTX for “{person}”. "
                        f"Please upload their PPTX to the '{INCOMING_CONTAINER}' container and try again."
         }), status_code=200, mimetype="application/json")
@@ -351,7 +337,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         sas = _blob_sas_url(INCOMING_CONTAINER, best)
 
-        # extract
+        # Extract
         extract_url = _build_url(req, PPTXEXTRACT_PATH, PPTXEXTRACT_KEY)
         s1, d1, r1 = _post_json(extract_url, {"ppt_blob_sas": sas, "pptx_name": best})
         if s1 != 200 or not isinstance(d1, dict):
@@ -363,7 +349,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         raw_cv = d1.get("raw") or d1.get("raw3") or d1
 
-        # normalize
+        # Normalize (your existing normalizer)
         normalize_url = _build_url(req, CVNORMALIZE_PATH, CVNORMALIZE_KEY)
         s2, d2, r2 = _post_json(normalize_url, {"raw": raw_cv, "pptx_name": best})
         if s2 != 200 or not isinstance(d2, dict):
@@ -375,7 +361,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         cv = d2.get("cv") or d2.get("normalized") or d2
 
-        # render
+        # Render
         html = _html_from_cv(cv, template)
         out_name = f"{os.path.splitext(os.path.basename(best))[0]}-{template}.pdf"
         render_url = _build_url(req, RENDER_PATH, RENDER_KEY)
@@ -396,7 +382,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as e:
         logging.exception("chatcv fatal")
-        # Return friendly 200 with message instead of a 500 to the UI
+        # Friendly message instead of HTTP 500 so UI stays happy
         return func.HttpResponse(json.dumps({
             "person_name": person, "template": template,
             "message": f"Something went wrong while generating the PDF. Details: {str(e)}"
